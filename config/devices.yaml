@@ -4,7 +4,7 @@
 
 devices:
   # 示例设备 - 替换为您自己的 ROM 下载链接
-  - rom_url: "https://example.com/your-rom.zip"
+  - rom_url: "https://ultimateota.d.miui.com/OS3.0.4.0.VLECNXM/unicorn-ota_full-OS3.0.4.0.VLECNXM-user-15.0-9be4b80759.zip?t=1783947940&s=f87f30f1cecb672edfaf0d6f6ee4fc46"
     # name: 可选，默认从 ROM 文件名自动生成
     # manual_offsets: 可选，自动提取失败时手动指定
     #   KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
