@@ -1,0 +1,134 @@
+name: Build RootmeKit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - config/devices.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      build_report: ${{ steps.report.outputs.build_report }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dwarves binutils
+
+      - name: Install vmlinux-to-elf
+        run: pip install vmlinux-to-elf
+
+      - name: Install payload-dumper-go
+        run: |
+          curl -sL https://github.com/ssut/payload-dumper-go/releases/latest/download/payload-dumper-go_linux_amd64 \
+            -o /usr/local/bin/payload-dumper-go
+          chmod +x /usr/local/bin/payload-dumper-go
+
+      - name: Setup Android NDK r27
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+
+      - name: Run build pipeline
+        id: build
+        run: |
+          python3 -m src.cli build \
+            --config config/devices.yaml \
+            --work-dir /tmp/build \
+            --output-dir output
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin:${{ env.PATH }}
+        continue-on-error: true
+
+      - name: Generate build report
+        id: report
+        if: always()
+        run: |
+          REPORT=""
+          if [ -d output ]; then
+            for device_dir in output/*/; do
+              device_name=$(basename "$device_dir")
+              if [ "$device_name" = "site" ]; then continue; fi
+              if [ -f "${device_dir}/preload.so" ]; then
+                REPORT="${REPORT}- **${device_name}**: BUILD_SUCCESS\n"
+              else
+                REPORT="${REPORT}- **${device_name}**: BUILD_FAILED\n"
+              fi
+            done
+          fi
+          if [ -z "$REPORT" ]; then
+            REPORT="- No devices built\n"
+          fi
+          echo "build_report<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$REPORT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/site/
+
+      - name: Create GitHub Release
+        if: always()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: RootmeKit Build #${{ github.run_number }}
+          body: |
+            ## RootmeKit Build Report
+
+            ${{ steps.report.outputs.build_report }}
+
+            **Commit**: ${{ github.sha }}
+            **Triggered by**: ${{ github.actor }}
+
+            ### Usage
+            1. Download `preload.so` for your device
+            2. Open the GitHub Pages site
+            3. Import `preload.so` into the web page
+            4. Get root!
+          files: |
+            output/*/preload.so
+            output/*/target.h
+            output/*/offsets.h
+            output/*/exploit.c
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    needs: build
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

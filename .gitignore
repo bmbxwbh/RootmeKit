@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+output/
+site/
+/tmp/
+*.so
+*.o
+*.elf
+vmlinux
+boot.img
+init_boot.img
+*.zip
+*.ozip
+*.pac

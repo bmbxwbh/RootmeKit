@@ -1,0 +1,19 @@
+# Firefox libxul.so 偏移数据库
+# 用于 Firefox JIT Type Confusion (CVE-2026-23274)
+
+firefox_versions:
+  "151.0":
+    arm64:
+      # 以下三个偏移从 Rootme exploit.html 提取
+      ARRAY_ISARRAY_NATIVE_OFF: "0x3075720"
+      MPROTECT_GOT_OFF: "0x8F2A0B8"
+      WASM_UNCHECKED_ENTRY_SLOT_OFFSET: "0x38"
+      # 以下偏移需要从对应版本 libxul.so 二进制中提取
+      # SET_ARRAY_LENGTH_OFF: 待填充
+      # NATIVE_FUNCTION_STUB_OFF: 待填充
+      # WASM_INSTANCE_CELL_OFF: 待填充
+    arm: {}
+
+  "150.0":
+    arm64: {}
+    arm: {}

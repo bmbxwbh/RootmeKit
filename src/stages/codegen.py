@@ -1,0 +1,233 @@
+"""Stage 6: Generate exploit code and compile.
+
+Renders the C exploit template with offset values and cross-compiles
+for the target architecture to produce preload.so.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+from jinja2 import Environment, FileSystemLoader
+
+logger = logging.getLogger(__name__)
+
+
+def _get_template_env() -> Environment:
+    """Get Jinja2 environment pointing to the templates directory."""
+    templates_dir = Path(__file__).parent.parent.parent / "templates"
+    return Environment(
+        loader=FileSystemLoader(str(templates_dir)),
+        keep_trailing_newline=True,
+    )
+
+
+def _run_cmd(
+    cmd: list[str],
+    *,
+    timeout: int = 300,
+    cwd: str | Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess command and return the result."""
+    logger.debug("Running: %s", " ".join(cmd))
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+
+
+def select_template(memory_type: str, kernel_version: str | None) -> str:
+    """Select the right C exploit template based on memory type and kernel version.
+
+    Returns:
+        Template identifier string (e.g., 'dma_heap_default', 'ashmem_default').
+    """
+    if memory_type == "dma_heap":
+        return "dma_heap_default"
+    return "ashmem_default"
+
+
+def generate_exploit_c(
+    target_h_path: str | Path,
+    offsets_h_path: str | Path,
+    memory_type: str,
+    output_dir: str | Path,
+    device_name: str = "unknown",
+    kernel_version: str | None = None,
+    kernel_is_gki: bool = False,
+    arch: str = "aarch64",
+) -> Path:
+    """Render exploit.c from the universal exploit.c.j2 template.
+
+    Returns:
+        Path to the generated exploit.c file.
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy headers to output dir for compilation
+    target_h = Path(target_h_path)
+    offsets_h = Path(offsets_h_path)
+
+    if target_h.exists():
+        shutil.copy2(target_h, out_dir / "target.h")
+    if offsets_h.exists():
+        shutil.copy2(offsets_h, out_dir / "offsets.h")
+
+    # Parse kernel version for template variables
+    kernel_major = 0
+    kernel_minor = 0
+    if kernel_version:
+        m = re.match(r"(\d+)\.(\d+)", kernel_version)
+        if m:
+            kernel_major = int(m.group(1))
+            kernel_minor = int(m.group(2))
+
+    # Render exploit.c from template
+    env = _get_template_env()
+    template = env.get_template("exploit/exploit.c.j2")
+    content = template.render(
+        device_name=device_name,
+        memory_type=memory_type,
+        is_gki=kernel_is_gki,
+        kernel_major=kernel_major,
+        kernel_minor=kernel_minor,
+        arch=arch,
+    )
+
+    exploit_c_path = out_dir / "exploit.c"
+    exploit_c_path.write_text(content)
+    logger.info("Generated exploit.c: %s", exploit_c_path)
+    return exploit_c_path
+
+
+def compile_exploit(
+    src_dir: str | Path,
+    output_dir: str | Path,
+    arch: str = "aarch64",
+) -> Path | None:
+    """Cross-compile exploit with NDK.
+
+    Args:
+        src_dir: Directory containing exploit.c and headers.
+        output_dir: Directory for compiled output.
+        arch: Target architecture.
+
+    Returns:
+        Path to the compiled binary, or None on failure.
+    """
+    src = Path(src_dir)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    exploit_c = src / "exploit.c"
+    if not exploit_c.exists():
+        logger.error("exploit.c not found: %s", exploit_c)
+        return None
+
+    output_bin = out_dir / "preload.so"
+
+    # Select compiler based on architecture
+    compiler_map: dict[str, str] = {
+        "aarch64": "aarch64-linux-android35-clang",
+        "arm": "armv7a-linux-androideabi35-clang",
+        "x86_64": "x86_64-linux-android35-clang",
+    }
+    compiler = compiler_map.get(arch, "aarch64-linux-android35-clang")
+
+    logger.info("Compiling exploit with %s for %s...", compiler, arch)
+
+    cmd = [
+        compiler,
+        "-O2",
+        "-Wall",
+        f"-I{src}",
+        "-shared",
+        "-o", str(output_bin),
+        str(exploit_c),
+    ]
+
+    proc = _run_cmd(cmd, cwd=str(src))
+    if proc.returncode != 0:
+        logger.error("Compilation failed:\n%s\n%s", proc.stdout, proc.stderr)
+        return None
+
+    if not output_bin.exists():
+        logger.error("Compiler produced no output")
+        return None
+
+    logger.info("Compiled preload.so: %s (%d bytes)", output_bin, output_bin.stat().st_size)
+    return output_bin
+
+
+def run(
+    prev_result: dict[str, Any],
+    work_dir: str | Path,
+    device_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Main entry point for codegen stage.
+
+    Args:
+        prev_result: Combined results from previous stages.
+        work_dir: Working directory.
+        device_config: Device configuration.
+
+    Returns:
+        dict with paths to generated files.
+    """
+    work = Path(work_dir)
+    src_dir = work / "codegen"
+    output_dir = work / "output"
+
+    device_name = device_config.get("name", "unknown")
+    memory_type = prev_result.get("memory_type", "dma_heap")
+    kernel_version = prev_result.get("kernel_version")
+    arch = prev_result.get("arch", "aarch64")
+
+    target_h_path = prev_result.get("target_h_path")
+    offsets_h_path = prev_result.get("offsets_h_path")
+
+    result: dict[str, Any] = {
+        "exploit_c_path": None,
+        "preload_so_path": None,
+    }
+
+    if not target_h_path or not offsets_h_path:
+        logger.error("Missing target.h or offsets.h from previous stage")
+        return result
+
+    # Generate exploit.c
+    exploit_c_path = generate_exploit_c(
+        target_h_path=target_h_path,
+        offsets_h_path=offsets_h_path,
+        memory_type=memory_type,
+        output_dir=src_dir,
+        device_name=device_name,
+        kernel_version=kernel_version,
+        kernel_is_gki=prev_result.get("kernel_is_gki", False),
+        arch=arch,
+    )
+    result["exploit_c_path"] = exploit_c_path
+
+    # Compile exploit → preload.so
+    exploit_bin = compile_exploit(src_dir, output_dir / device_name, arch=arch)
+    if exploit_bin:
+        result["preload_so_path"] = exploit_bin
+
+    # Copy headers to device output for reference
+    device_output_dir = output_dir / device_name
+    device_output_dir.mkdir(parents=True, exist_ok=True)
+
+    if Path(target_h_path).exists():
+        shutil.copy2(target_h_path, device_output_dir / "target.h")
+    if Path(offsets_h_path).exists():
+        shutil.copy2(offsets_h_path, device_output_dir / "offsets.h")
+    if exploit_c_path and exploit_c_path.exists():
+        shutil.copy2(exploit_c_path, device_output_dir / "exploit.c")
+
+    logger.info("Codegen complete for %s: exploit_c=%s, preload_so=%s",
+                device_name, exploit_c_path, exploit_bin)
+
+    return result

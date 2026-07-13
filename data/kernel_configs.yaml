@@ -1,0 +1,58 @@
+# 内核配置推断数据库
+# 当 BTF 不可用时，根据内核版本和 GKI 状态推断结构体偏移
+
+kernel_defaults:
+  arm64:
+    va_bits: 48
+    struct_page_shift: 6
+    page_size: 4096
+
+  # GKI 6.6 标准构建 (clang 18, aarch64)
+  gki_6_6:
+    task_struct:
+      cred: 0x850
+      real_cred: 0x848
+      pid: 0x6A8
+      tasks: 0x818
+      seccomp: 0xBB0
+      flags: 0x8
+    cred:
+      uid: 4
+      gid: 8
+      euid: 20
+      egid: 24
+      cap_inheritable: 32
+      cap_permitted: 48
+      cap_effective: 64
+      cap_bset: 80
+      security: 120
+    pipe_buffer:
+      page: 0
+      ops: 8
+      flags: 16
+      private: 24
+    page:
+      flags: 0
+      lru: 8
+      mapping: 24
+      index: 32
+
+  # GKI 6.1 标准构建
+  gki_6_1:
+    task_struct:
+      cred: 0x7E8
+      real_cred: 0x7E0
+      pid: 0x648
+      tasks: 0x7B0
+      seccomp: 0xA90
+      flags: 0x8
+
+  # 4.19 MTK 典型值
+  mtk_4_19:
+    task_struct:
+      cred: 0x7B0
+      real_cred: 0x7A8
+      pid: 0x610
+      tasks: 0x778
+      seccomp: 0xA50
+      flags: 0x8

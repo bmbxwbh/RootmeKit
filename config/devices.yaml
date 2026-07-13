@@ -1,0 +1,11 @@
+# RootmeKit 设备配置
+# 用户只需填写 rom_url，其余全自动检测
+# 修改此文件后推送到 main 分支，GitHub Action 自动构建
+
+devices:
+  # 示例设备 - 替换为您自己的 ROM 下载链接
+  - rom_url: "https://example.com/your-rom.zip"
+    # name: 可选，默认从 ROM 文件名自动生成
+    # manual_offsets: 可选，自动提取失败时手动指定
+    #   KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
+    #   INIT_TASK_OFF: "0x0"
