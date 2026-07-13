@@ -151,10 +151,25 @@ def _parse_message(buf: bytes) -> list[tuple[int, int, object]]:
 def _parse_partition_update(data: bytes) -> dict:
     """Parse a PartitionUpdate protobuf message.
 
-    Fields we care about:
+    Per AOSP update_metadata.proto:
       field 1: partition_name (string, length-delimited)
-      field 5: new_partition_info (message) → field 1: size (varint)
-      field 6: operations (repeated message, length-delimited)
+      field 2: run_postinstall (bool, varint)
+      field 3: postinstall_path (string)
+      field 4: filesystem_type (string)
+      field 5: new_partition_info (message: PartitionInfo)
+        - field 1: size (varint)
+        - field 2: hash (bytes)
+      field 6: old_partition_info (message: PartitionInfo)
+      field 7: operations (repeated InstallOperation, length-delimited)
+      field 8: postinstall_optional (bool)
+      field 9: hash_tree_extent (Extent)
+      field 10: hash_tree_data (bytes)
+      field 11: hash_tree_algorithm (string)
+      field 12: hash_tree_salt (bytes)
+      field 13: fec_extent (Extent)
+      field 14: fec_data (bytes)
+      field 15: fec_roots (varint)
+      field 16: version (string)
     """
     info: dict = {
         "partition_name": "",
@@ -177,7 +192,7 @@ def _parse_partition_update(data: bytes) -> dict:
                         info["new_partition_size"] = sval
             except (ValueError, IndexError):
                 pass
-        elif fn == 6 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+        elif fn == 7 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             try:
                 op = _parse_install_operation(val)
                 info["operations"].append(op)
@@ -340,6 +355,13 @@ def extract_payload_partitions(
         )
 
     # Parse the manifest to find partitions
+    # Per AOSP update_metadata.proto:
+    #   field 1: block_size (varint)
+    #   field 2: manifest_flags (varint)
+    #   field 3: minor_version (varint)
+    #   field 4: partitions (repeated PartitionUpdate, length-delimited)
+    #   field 5: max_timestamp (varint)
+    #   field 6: dynamic_partition_metadata (message)
     partitions: list[dict] = []
     offset = 0
     while offset < len(manifest_data):
@@ -347,7 +369,7 @@ def extract_payload_partitions(
             fn, wt, val, offset = _decode_field(manifest_data, offset)
         except (ValueError, IndexError):
             break
-        if fn == 1 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+        if fn == 4 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             try:
                 pu = _parse_partition_update(val)
                 partitions.append(pu)
