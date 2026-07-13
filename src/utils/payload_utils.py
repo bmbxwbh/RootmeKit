@@ -212,43 +212,67 @@ def extract_payload_partitions(
     logger.info("payload.bin size: %d bytes", file_size)
 
     # Read only the header to parse the manifest (avoid loading 6GB+ into RAM)
+    # First read just enough to detect the format
     with open(payload_path, "rb") as f:
-        magic = f.read(20)
+        magic_peek = f.read(20)
 
-        if magic.startswith(PAYLOAD_MAGIC_CRAU):
-            # Modern CrAU format
-            logger.info("Detected CrAU (modern) payload format")
-            format_version = struct.unpack(">Q", f.read(8))[0]
-            manifest_size = struct.unpack(">Q", f.read(8))[0]
-            logger.info("CrAU format version: %d, manifest size: %d", format_version, manifest_size)
+    if magic_peek.startswith(PAYLOAD_MAGIC_CRAU):
+        # Modern CrAU format
+        logger.info("Detected CrAU (modern) payload format")
+        # CrAU header:
+        #   [4 bytes] "CrAU"
+        #   [8 bytes] format_version (big-endian uint64)
+        #   [8 bytes] manifest_size (big-endian uint64)
+        #   [32 bytes] metadata_signature_hash (only if version >= 2)
+        #   [manifest_size bytes] DeltaArchiveManifest
+        # We already read 20 bytes; version and manifest_size are at offset 4 and 12
+        format_version = struct.unpack(">Q", magic_peek[4:12])[0]
+        manifest_size = struct.unpack(">Q", magic_peek[12:20])[0]
+        logger.info("CrAU format version: %d, manifest size: %d", format_version, manifest_size)
 
-            metadata_sig_size = 32 if format_version >= 2 else 0
-            f.read(metadata_sig_size)  # skip signature
+        metadata_sig_size = 32 if format_version >= 2 else 0
+        # After 20-byte header + signature comes the manifest
+        manifest_offset = 20 + metadata_sig_size
 
+        with open(payload_path, "rb") as f:
+            f.seek(manifest_offset)
             manifest_data = f.read(manifest_size)
             data_blob_start = f.tell()
 
-        elif magic.startswith(PAYLOAD_MAGIC_BRILLO):
-            # Legacy BrilloUpdatePayload format
-            logger.info("Detected BrilloUpdatePayload (legacy) payload format")
-            header_length = struct.unpack(">Q", f.read(8))[0]
+    elif magic_peek.startswith(PAYLOAD_MAGIC_BRILLO):
+        # Legacy BrilloUpdatePayload format
+        logger.info("Detected BrilloUpdatePayload (legacy) payload format")
+        # We already read 20 bytes = magic (20 bytes)
+        # Next: 8 bytes header_length
+        header_length = struct.unpack(">Q", magic_peek[20:28])[0] if len(magic_peek) >= 28 else 0
 
-            if header_length > file_size:
-                # Re-read with uint32
+        if header_length == 0 or header_length > file_size:
+            # Need to read more for the header length
+            with open(payload_path, "rb") as f:
                 f.seek(len(PAYLOAD_MAGIC_BRILLO))
-                header_length = struct.unpack(">I", f.read(4))[0]
-                # Re-seek past the 4-byte header length
-                f.seek(len(PAYLOAD_MAGIC_BRILLO) + 4)
+                raw_hl = f.read(8)
+                header_length = struct.unpack(">Q", raw_hl)[0]
+                if header_length > file_size:
+                    f.seek(len(PAYLOAD_MAGIC_BRILLO))
+                    header_length = struct.unpack(">I", f.read(4))[0]
+                    manifest_offset = len(PAYLOAD_MAGIC_BRILLO) + 4
+                else:
+                    manifest_offset = len(PAYLOAD_MAGIC_BRILLO) + 8
+        else:
+            manifest_offset = len(PAYLOAD_MAGIC_BRILLO) + 8
 
-            logger.info("Manifest header length: %d", header_length)
+        logger.info("Manifest header length: %d", header_length)
+
+        with open(payload_path, "rb") as f:
+            f.seek(manifest_offset)
             manifest_data = f.read(header_length)
             data_blob_start = f.tell()
 
-        else:
-            raise ValueError(
-                f"Invalid payload magic: expected {PAYLOAD_MAGIC_CRAU!r} or "
-                f"{PAYLOAD_MAGIC_BRILLO!r}, got {magic!r}"
-            )
+    else:
+        raise ValueError(
+            f"Invalid payload magic: expected {PAYLOAD_MAGIC_CRAU!r} or "
+            f"{PAYLOAD_MAGIC_BRILLO!r}, got {magic_peek!r}"
+        )
 
     # Parse the manifest to find partitions
     partitions: list[dict] = []
