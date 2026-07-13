@@ -1,11 +1,15 @@
-"""Android boot image handling utilities."""
+"""Android boot image handling utilities.
+
+Uses Python-native implementations instead of external tools:
+- zipfile instead of unzip
+- Custom Android boot image parser instead of unpackbootimg/mkbootimg
+"""
 
 from __future__ import annotations
 
 import logging
-import re
-import shutil
-import subprocess
+import struct
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +18,6 @@ logger = logging.getLogger(__name__)
 # Android boot image magic
 _BOOT_MAGIC = b"ANDROID!"
 _BOOT_MAGIC_SIZE = 8
-
-
-def _run_cmd(cmd: list[str], *, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess command and return the result."""
-    logger.debug("Running: %s", " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
 def detect_bootimg_type(path: str | Path) -> str | None:
@@ -65,7 +63,6 @@ def detect_bootimg_type(path: str | Path) -> str | None:
             header_data = f.read(4)
             if len(header_data) >= 4:
                 # header_version is a uint32 at this offset for v0-v2
-                import struct
                 header_version = struct.unpack("<I", header_data)[0]
                 if header_version >= 4:
                     # v4+ usually means init_boot is separate
@@ -77,8 +74,204 @@ def detect_bootimg_type(path: str | Path) -> str | None:
     return "boot"
 
 
+def _parse_boot_header_v0v1(data: bytes) -> dict[str, Any] | None:
+    """Parse Android boot image header v0/v1.
+
+    The v0 header is 1648 bytes. v1 adds 4 fields (1648 + 16 = 1664).
+    v2 adds 2 more fields (1664 + 8 = 1672).
+
+    Returns:
+        Parsed header dict, or None if parsing fails.
+    """
+    if len(data) < 1648:
+        return None
+
+    # v0/v1/v2 common fields (first 40 bytes + rest)
+    (
+        kernel_size,
+        kernel_addr,
+        ramdisk_size,
+        ramdisk_addr,
+        second_size,
+        second_addr,
+        tags_addr,
+        page_size,
+        header_version,
+        os_version,
+    ) = struct.unpack_from("<10I", data, 8)
+
+    return {
+        "header_version": header_version,
+        "kernel_size": kernel_size,
+        "kernel_addr": kernel_addr,
+        "ramdisk_size": ramdisk_size,
+        "ramdisk_addr": ramdisk_addr,
+        "second_size": second_size,
+        "second_addr": second_addr,
+        "tags_addr": tags_addr,
+        "page_size": page_size,
+        "os_version": os_version,
+    }
+
+
+def _parse_boot_header_v3(data: bytes) -> dict[str, Any] | None:
+    """Parse Android boot image header v3.
+
+    v3 header is simpler: 1580 bytes.
+    No second loader, no DTB, no tags.
+
+    Returns:
+        Parsed header dict, or None if parsing fails.
+    """
+    if len(data) < 1580:
+        return None
+
+    (
+        kernel_size,
+        ramdisk_size,
+        os_version,
+        header_version,
+        reserved,
+    ) = struct.unpack_from("<5I", data, 8)
+
+    return {
+        "header_version": header_version,
+        "kernel_size": kernel_size,
+        "ramdisk_size": ramdisk_size,
+        "page_size": 4096,  # v3 always uses 4096
+        "second_size": 0,
+        "os_version": os_version,
+    }
+
+
+def _parse_boot_header_v4(data: bytes) -> dict[str, Any] | None:
+    """Parse Android boot image header v4.
+
+    v4 header is even simpler and always paired with init_boot.
+    Signature may follow the header.
+
+    Returns:
+        Parsed header dict, or None if parsing fails.
+    """
+    if len(data) < 100:
+        return None
+
+    (
+        kernel_size,
+        ramdisk_size,
+        os_version,
+        header_version,
+        reserved,
+    ) = struct.unpack_from("<5I", data, 8)
+
+    return {
+        "header_version": header_version,
+        "kernel_size": kernel_size,
+        "ramdisk_size": ramdisk_size,
+        "page_size": 4096,  # v4 always uses 4096
+        "second_size": 0,
+        "os_version": os_version,
+    }
+
+
+def _page_align(size: int, page_size: int) -> int:
+    """Round up size to the next page boundary."""
+    return (size + page_size - 1) & ~(page_size - 1)
+
+
+def _unpack_bootimg_python(boot_img: Path, out_dir: Path) -> Path | None:
+    """Unpack a boot image using pure Python.
+
+    Parses the Android boot image header to find the kernel section,
+    then extracts it without needing unpackbootimg or mkbootimg.
+
+    Args:
+        boot_img: Path to the boot image file.
+        out_dir: Directory to extract into.
+
+    Returns:
+        Path to the extracted kernel file, or None on failure.
+    """
+    try:
+        with open(boot_img, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        logger.error("Failed to read boot image: %s", e)
+        return None
+
+    if len(data) < 8 or data[:8] != _BOOT_MAGIC:
+        logger.error("Not an Android boot image (bad magic)")
+        return None
+
+    # Read header version to determine header format
+    header_version = struct.unpack_from("<I", data, 40)[0]
+
+    # Parse header based on version
+    header: dict[str, Any] | None = None
+    header_size = 0
+
+    if header_version <= 2:
+        # v0/v1/v2 header sizes
+        if header_version == 0:
+            header_size = 1648
+        elif header_version == 1:
+            header_size = 1664
+        else:  # v2
+            header_size = 1672
+        header = _parse_boot_header_v0v1(data[:header_size])
+    elif header_version == 3:
+        header_size = 1580
+        header = _parse_boot_header_v3(data[:header_size])
+    elif header_version >= 4:
+        header_size = 100  # approximate, v4 is small
+        header = _parse_boot_header_v4(data[:header_size])
+    else:
+        logger.error("Unknown boot header version: %d", header_version)
+        return None
+
+    if header is None:
+        logger.error("Failed to parse boot image header")
+        return None
+
+    logger.info("Boot image header v%d: kernel_size=%d, ramdisk_size=%d, page_size=%d",
+                header["header_version"], header["kernel_size"],
+                header["ramdisk_size"], header["page_size"])
+
+    kernel_size = header["kernel_size"]
+    page_size = header["page_size"]
+
+    if kernel_size == 0:
+        logger.error("Kernel size is 0 in boot image header")
+        return None
+
+    # Calculate kernel offset: right after the header, page-aligned
+    kernel_offset = _page_align(header_size, page_size)
+
+    if kernel_offset + kernel_size > len(data):
+        logger.error("Kernel section extends beyond file (offset=%d, size=%d, file=%d)",
+                     kernel_offset, kernel_size, len(data))
+        return None
+
+    # Extract kernel
+    kernel_data = data[kernel_offset:kernel_offset + kernel_size]
+    kernel_out = out_dir / "kernel"
+
+    try:
+        with open(kernel_out, "wb") as f:
+            f.write(kernel_data)
+    except OSError as e:
+        logger.error("Failed to write kernel file: %s", e)
+        return None
+
+    logger.info("Extracted kernel from boot image (v%d, %d bytes): %s",
+                header["header_version"], kernel_size, kernel_out)
+    return kernel_out
+
+
 def unpack_bootimg(boot_img_path: str | Path, output_dir: str | Path) -> Path | None:
-    """Unpack a boot image using unpackbootimg or mkbootimg tools.
+    """Unpack a boot image to extract the kernel.
+
+    Uses pure Python implementation (no external unpackbootimg/mkbootimg required).
 
     Args:
         boot_img_path: Path to the boot image file.
@@ -95,32 +288,15 @@ def unpack_bootimg(boot_img_path: str | Path, output_dir: str | Path) -> Path | 
         logger.error("Boot image not found: %s", boot_img)
         return None
 
-    # Try unpackbootimg first
-    proc = _run_cmd(
-        ["unpackbootimg", "-i", str(boot_img), "-o", str(out_dir)],
-    )
-    if proc.returncode == 0:
-        # unpackbootimg creates a directory named after the image
-        # Look for the kernel file
-        kernel_candidates = list(out_dir.glob("**/kernel")) + list(out_dir.glob("**/kernel.img"))
-        if kernel_candidates:
-            kernel_path = kernel_candidates[0]
-            logger.info("Unpacked boot image, kernel at: %s", kernel_path)
-            return kernel_path
+    # Use Python-native boot image parser
+    kernel_path = _unpack_bootimg_python(boot_img, out_dir)
+    if kernel_path and kernel_path.exists() and kernel_path.stat().st_size > 0:
+        logger.info("Unpacked boot image, kernel at: %s", kernel_path)
+        return kernel_path
 
-    # Try mkbootimg's unpack variant
-    proc = _run_cmd(
-        ["mkbootimg", "--unpack", str(boot_img)],
-    )
-    if proc.returncode == 0:
-        kernel_candidates = list(out_dir.glob("kernel")) + list(out_dir.glob("kernel.img"))
-        if kernel_candidates:
-            return kernel_candidates[0]
-
-    # Manual extraction as fallback: skip boot header to get kernel
-    # Boot image header is typically 1648 bytes (v0) or 1580 bytes (v1-2)
-    # We try several known header sizes
-    logger.info("Trying manual kernel extraction from boot image")
+    # Fallback: Manual extraction with known header sizes
+    # This is the old approach kept as a secondary fallback
+    logger.info("Python boot image parser failed, trying manual header-size extraction")
     header_sizes = [1648, 1580, 1660, 4096]
     for hs in header_sizes:
         kernel_out = out_dir / "kernel"
@@ -181,6 +357,8 @@ def find_boot_images(unpack_dir: str | Path) -> dict[str, Path]:
 def detect_rom_type(rom_path: str | Path) -> str:
     """Detect ROM format.
 
+    Uses Python-native zipfile instead of unzip command.
+
     Returns:
         One of: 'payload' (has payload.bin), 'ozip' (.ozip extension, OPPO),
         'pac' (Samsung), 'boot_img' (direct boot image), 'unknown'.
@@ -218,13 +396,16 @@ def detect_rom_type(rom_path: str | Path) -> str:
             return "payload"
 
     # Check if it's a zip file that might contain payload.bin
-    if rom.suffix.lower() in (".zip", ".rar", ".7z"):
-        # Try listing the zip contents
-        if rom.suffix.lower() == ".zip":
-            proc = _run_cmd(["unzip", "-l", str(rom)])
-            if proc.returncode == 0 and "payload.bin" in proc.stdout:
-                logger.info("Detected ROM type: payload (zip containing payload.bin)")
-                return "payload"
+    if rom.suffix.lower() == ".zip":
+        # Use Python's zipfile module instead of unzip command
+        try:
+            with zipfile.ZipFile(rom, "r") as zf:
+                namelist = zf.namelist()
+                if any("payload.bin" in name for name in namelist):
+                    logger.info("Detected ROM type: payload (zip containing payload.bin)")
+                    return "payload"
+        except (zipfile.BadZipFile, OSError) as e:
+            logger.debug("Failed to read zip file: %s", e)
 
     logger.warning("Could not determine ROM type for: %s", rom)
     return "unknown"

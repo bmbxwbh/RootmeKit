@@ -77,28 +77,23 @@ def _try_vmlinux_to_elf_recovery(vmlinux_path: Path, output_dir: Path) -> dict[s
 def _try_kallsyms_extraction(vmlinux_path: Path) -> dict[str, int]:
     """Method 3: Try extracting kallsyms data directly from the binary.
 
-    This uses strings + pattern matching to find embedded kallsyms tables.
+    This uses pyelftools to read the symbol table instead of the
+    external `nm` command.
     """
     logger.info("Method 3: Trying direct kallsyms extraction...")
 
     symbols: dict[str, int] = {}
 
-    # Use nm to check for any symbols
-    proc = _run_cmd(["nm", str(vmlinux_path)])
-    if proc.returncode == 0:
-        for line in proc.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    addr = int(parts[0], 16)
-                    name = parts[2]
-                    symbols[name] = addr
-                except (ValueError, IndexError):
-                    continue
+    # Use pyelftools to read symbol table instead of nm
+    from ..utils.elf_utils import read_symbol_table
 
-    if len(symbols) > 50:
-        logger.info("nm extracted %d symbols", len(symbols))
-        return symbols
+    try:
+        all_symbols = read_symbol_table(vmlinux_path)
+        if len(all_symbols) > 50:
+            logger.info("pyelftools extracted %d symbols", len(all_symbols))
+            return all_symbols
+    except Exception as e:
+        logger.debug("pyelftools symbol extraction failed: %s", e)
 
     return {}
 
