@@ -79,12 +79,46 @@ def _decode_field(buf: bytes, offset: int) -> tuple[int, int, object, int]:
         value, offset = _read_varint(buf, offset)
     elif wire_type == _WIRE_LENGTH_DELIMITED:
         length, offset = _read_varint(buf, offset)
+        if offset + length > len(buf):
+            raise ValueError(f"Length-delimited field {field_number} extends beyond buffer")
         value = buf[offset:offset + length]
         offset += length
     elif wire_type == _WIRE_64BIT:
+        if offset + 8 > len(buf):
+            raise ValueError(f"64-bit field {field_number} extends beyond buffer")
         value = buf[offset:offset + 8]
         offset += 8
     elif wire_type == _WIRE_32BIT:
+        if offset + 4 > len(buf):
+            raise ValueError(f"32-bit field {field_number} extends beyond buffer")
+        value = buf[offset:offset + 4]
+        offset += 4
+    elif wire_type == 3:
+        # Start group (deprecated) — skip all fields until end group (wire type 4)
+        value = None
+        depth = 1
+        while offset < len(buf) and depth > 0:
+            skip_tag, offset = _read_varint(buf, offset)
+            skip_wt = skip_tag & 0x07
+            if skip_wt == _WIRE_VARINT:
+                _, offset = _read_varint(buf, offset)
+            elif skip_wt == _WIRE_LENGTH_DELIMITED:
+                skip_len, offset = _read_varint(buf, offset)
+                offset += skip_len
+            elif skip_wt == _WIRE_64BIT:
+                offset += 8
+            elif skip_wt == _WIRE_32BIT:
+                offset += 4
+            elif skip_wt == 3:
+                depth += 1
+            elif skip_wt == 4:
+                depth -= 1
+    elif wire_type == 4:
+        # End group — should not appear at top level
+        value = None
+    elif wire_type == 5:
+        if offset + 4 > len(buf):
+            raise ValueError(f"32-bit field {field_number} extends beyond buffer")
         value = buf[offset:offset + 4]
         offset += 4
     else:
@@ -94,12 +128,19 @@ def _decode_field(buf: bytes, offset: int) -> tuple[int, int, object, int]:
 
 
 def _parse_message(buf: bytes) -> list[tuple[int, int, object]]:
-    """Parse a protobuf message into a list of (field_number, wire_type, value)."""
+    """Parse a protobuf message into a list of (field_number, wire_type, value).
+
+    Skips unrecognized fields gracefully instead of crashing.
+    """
     fields: list[tuple[int, int, object]] = []
     offset = 0
     while offset < len(buf):
-        fn, wt, val, offset = _decode_field(buf, offset)
-        fields.append((fn, wt, val))
+        try:
+            fn, wt, val, offset = _decode_field(buf, offset)
+            fields.append((fn, wt, val))
+        except (ValueError, IndexError):
+            # Corrupted or unknown field — stop parsing
+            break
     return fields
 
 
@@ -120,17 +161,28 @@ def _parse_partition_update(data: bytes) -> dict:
         "new_partition_size": 0,
         "operations": [],
     }
-    for fn, _wt, val in _parse_message(data):
-        if fn == 1 and isinstance(val, bytes):
+    offset = 0
+    while offset < len(data):
+        try:
+            fn, wt, val, offset = _decode_field(data, offset)
+        except (ValueError, IndexError):
+            break
+        if fn == 1 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             info["partition_name"] = val.decode("utf-8", errors="replace")
-        elif fn == 5 and isinstance(val, bytes):
+        elif fn == 5 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             # PartitionInfo sub-message
-            for sfn, _swt, sval in _parse_message(val):
-                if sfn == 1:
-                    info["new_partition_size"] = sval
-        elif fn == 6 and isinstance(val, bytes):
-            op = _parse_install_operation(val)
-            info["operations"].append(op)
+            try:
+                for sfn, _swt, sval in _parse_message(val):
+                    if sfn == 1:
+                        info["new_partition_size"] = sval
+            except (ValueError, IndexError):
+                pass
+        elif fn == 6 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            try:
+                op = _parse_install_operation(val)
+                info["operations"].append(op)
+            except (ValueError, IndexError):
+                pass
     return info
 
 
@@ -149,16 +201,24 @@ def _parse_install_operation(data: bytes) -> dict:
         "data_length": 0,
         "dst_extents": [],
     }
-    for fn, _wt, val in _parse_message(data):
-        if fn == 1:
+    offset = 0
+    while offset < len(data):
+        try:
+            fn, wt, val, offset = _decode_field(data, offset)
+        except (ValueError, IndexError):
+            break
+        if fn == 1 and wt == _WIRE_VARINT:
             op["type"] = val
-        elif fn == 2:
+        elif fn == 2 and wt == _WIRE_VARINT:
             op["data_offset"] = val
-        elif fn == 3:
+        elif fn == 3 and wt == _WIRE_VARINT:
             op["data_length"] = val
-        elif fn == 4 and isinstance(val, bytes):
-            extent = _parse_extent(val)
-            op["dst_extents"].append(extent)
+        elif fn == 4 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            try:
+                extent = _parse_extent(val)
+                op["dst_extents"].append(extent)
+            except (ValueError, IndexError):
+                pass
     return op
 
 
@@ -170,10 +230,15 @@ def _parse_extent(data: bytes) -> dict:
       field 2: num_blocks (varint)
     """
     ext: dict = {"start_block": 0, "num_blocks": 0}
-    for fn, _wt, val in _parse_message(data):
-        if fn == 1:
+    offset = 0
+    while offset < len(data):
+        try:
+            fn, wt, val, offset = _decode_field(data, offset)
+        except (ValueError, IndexError):
+            break
+        if fn == 1 and wt == _WIRE_VARINT:
             ext["start_block"] = val
-        elif fn == 2:
+        elif fn == 2 and wt == _WIRE_VARINT:
             ext["num_blocks"] = val
     return ext
 
@@ -276,11 +341,18 @@ def extract_payload_partitions(
 
     # Parse the manifest to find partitions
     partitions: list[dict] = []
-    for fn, _wt, val in _parse_message(manifest_data):
-        if fn == 1 and isinstance(val, bytes):
-            # repeated PartitionUpdate
-            pu = _parse_partition_update(val)
-            partitions.append(pu)
+    offset = 0
+    while offset < len(manifest_data):
+        try:
+            fn, wt, val, offset = _decode_field(manifest_data, offset)
+        except (ValueError, IndexError):
+            break
+        if fn == 1 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            try:
+                pu = _parse_partition_update(val)
+                partitions.append(pu)
+            except (ValueError, IndexError):
+                pass
 
     logger.info(
         "Found %d partitions in manifest: %s",
