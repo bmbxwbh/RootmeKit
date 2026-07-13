@@ -1,10 +1,23 @@
 """Python-native Android OTA payload.bin parser.
 
-Extracts partition images (e.g. init_boot, boot) from AOSP BrilloUpdatePayload
-format without depending on external tools like payload-dumper-go.
+Extracts partition images (e.g. init_boot, boot) from Android OTA
+payload.bin files without depending on external tools like payload-dumper-go.
 
-The payload.bin format:
-  [4 bytes]  header_length (big-endian uint32)
+Supports two payload formats:
+  1. **BrilloUpdatePayload** (legacy): magic = ``BrilloUpdatePayload``
+  2. **CrAU** (modern, Chrome OS Update Engine v2): magic = ``CrAU``
+
+CrAU v2 format (used by modern Xiaomi, OnePlus, etc.):
+  [4 bytes]  magic = ``CrAU``
+  [8 bytes]  format_version (big-endian uint64) — typically 2
+  [8 bytes]  manifest_size (big-endian uint64)
+  [32 bytes] metadata_signature (SHA-256, can be ignored)
+  [manifest_size bytes] DeltaArchiveManifest (protobuf)
+  [remaining bytes] data blobs
+
+BrilloUpdatePayload format (legacy):
+  [20 bytes] magic = ``BrilloUpdatePayload``
+  [8 bytes]  header_length (big-endian uint64)
   [header_length bytes] DeltaArchiveManifest (protobuf)
   [remaining bytes] data blobs
 
@@ -20,7 +33,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PAYLOAD_MAGIC = b"BrilloUpdatePayload"
+PAYLOAD_MAGIC_BRILLO = b"BrilloUpdatePayload"
+PAYLOAD_MAGIC_CRAU = b"CrAU"
 
 # Protobuf wire types
 _WIRE_VARINT = 0
@@ -194,53 +208,47 @@ def extract_payload_partitions(
     if not payload_path.exists():
         raise FileNotFoundError(f"payload.bin not found: {payload_path}")
 
+    file_size = payload_path.stat().st_size
+    logger.info("payload.bin size: %d bytes", file_size)
+
+    # Read only the header to parse the manifest (avoid loading 6GB+ into RAM)
     with open(payload_path, "rb") as f:
-        payload_data = f.read()
+        magic = f.read(20)
 
-    logger.info("Read payload.bin: %d bytes", len(payload_data))
+        if magic.startswith(PAYLOAD_MAGIC_CRAU):
+            # Modern CrAU format
+            logger.info("Detected CrAU (modern) payload format")
+            format_version = struct.unpack(">Q", f.read(8))[0]
+            manifest_size = struct.unpack(">Q", f.read(8))[0]
+            logger.info("CrAU format version: %d, manifest size: %d", format_version, manifest_size)
 
-    # Validate magic
-    if not payload_data.startswith(PAYLOAD_MAGIC):
-        raise ValueError(
-            f"Invalid payload magic: expected {PAYLOAD_MAGIC!r}, "
-            f"got {payload_data[:len(PAYLOAD_MAGIC)]!r}"
-        )
+            metadata_sig_size = 32 if format_version >= 2 else 0
+            f.read(metadata_sig_size)  # skip signature
 
-    # The structure after the magic is:
-    #   [8 bytes]  "AuPayload" or similar file-format identifier (varies)
-    #   [4 bytes]  header_length (big-endian uint32)  — at offset len(MAGIC)
-    # Actually, the standard format is:
-    #   "BrilloUpdatePayload" +  header_length (uint64 big-endian) + manifest + blobs
-    # But some variants use uint32. We try both.
+            manifest_data = f.read(manifest_size)
+            data_blob_start = f.tell()
 
-    offset = len(PAYLOAD_MAGIC)
+        elif magic.startswith(PAYLOAD_MAGIC_BRILLO):
+            # Legacy BrilloUpdatePayload format
+            logger.info("Detected BrilloUpdatePayload (legacy) payload format")
+            header_length = struct.unpack(">Q", f.read(8))[0]
 
-    # Try uint64 first (standard AOSP format)
-    if offset + 8 > len(payload_data):
-        raise ValueError("Payload file too small to read header length")
+            if header_length > file_size:
+                # Re-read with uint32
+                f.seek(len(PAYLOAD_MAGIC_BRILLO))
+                header_length = struct.unpack(">I", f.read(4))[0]
+                # Re-seek past the 4-byte header length
+                f.seek(len(PAYLOAD_MAGIC_BRILLO) + 4)
 
-    header_length = struct.unpack(">Q", payload_data[offset:offset + 8])[0]
-    offset += 8
+            logger.info("Manifest header length: %d", header_length)
+            manifest_data = f.read(header_length)
+            data_blob_start = f.tell()
 
-    # Sanity check: if header_length is unreasonably large, try uint32
-    if header_length > len(payload_data):
-        # Re-try with uint32 at the original offset
-        header_length_u32 = struct.unpack(">I", payload_data[len(PAYLOAD_MAGIC):len(PAYLOAD_MAGIC) + 4])[0]
-        if header_length_u32 < len(payload_data):
-            header_length = header_length_u32
-            offset = len(PAYLOAD_MAGIC) + 4
-        # else: keep the uint64 value and let it fail naturally below
-
-    logger.info("Manifest header length: %d", header_length)
-
-    if offset + header_length > len(payload_data):
-        raise ValueError(
-            f"Manifest extends beyond file (offset={offset}, "
-            f"header_length={header_length}, file_size={len(payload_data)})"
-        )
-
-    manifest_data = payload_data[offset:offset + header_length]
-    data_blob_start = offset + header_length
+        else:
+            raise ValueError(
+                f"Invalid payload magic: expected {PAYLOAD_MAGIC_CRAU!r} or "
+                f"{PAYLOAD_MAGIC_BRILLO!r}, got {magic!r}"
+            )
 
     # Parse the manifest to find partitions
     partitions: list[dict] = []
@@ -325,23 +333,24 @@ def extract_payload_partitions(
             logger.warning("No extractable operations for partition %s", name)
             continue
 
-        # Write partition image
+        # Write partition image using seek/read on the payload file
         try:
-            with open(out_file, "wb") as fout:
+            with open(payload_path, "rb") as fin, open(out_file, "wb") as fout:
                 if total_size > 0:
                     fout.truncate(total_size)
 
                 for data_off, data_len, dst_offset, dst_length, op_type in ops_to_write:
                     abs_offset = data_blob_start + data_off
-                    if abs_offset + data_len > len(payload_data):
+                    if abs_offset + data_len > file_size:
                         logger.error(
                             "Data blob for partition %s extends beyond file "
                             "(offset=%d, length=%d, file_size=%d)",
-                            name, abs_offset, data_len, len(payload_data),
+                            name, abs_offset, data_len, file_size,
                         )
                         continue
 
-                    blob = payload_data[abs_offset:abs_offset + data_len]
+                    fin.seek(abs_offset)
+                    blob = fin.read(data_len)
 
                     # Handle compressed operation types
                     if op_type == 1:  # REPLACE_BZ (bzip2)
