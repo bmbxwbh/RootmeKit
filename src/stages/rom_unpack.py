@@ -30,7 +30,7 @@ def _run_cmd(
 
 
 def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
-    """Download ROM with wget, show progress, return local path.
+    """Download ROM with curl or wget, return local path.
 
     Args:
         rom_url: URL to download the ROM from.
@@ -55,19 +55,26 @@ def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
         return local_path
 
     logger.info("Downloading ROM from: %s", rom_url)
-    proc = subprocess.run(
-        ["wget", "--progress=bar:force:noscroll", "-O", str(local_path), rom_url],
-        timeout=3600,  # 1 hour timeout
-    )
-    if proc.returncode != 0:
-        # Try with curl as fallback
-        logger.warning("wget failed, trying curl...")
+
+    # Prefer curl (available on GitHub Actions runners), fall back to wget
+    curl_path = shutil.which("curl")
+    wget_path = shutil.which("wget")
+
+    if curl_path:
         proc = subprocess.run(
-            ["curl", "-L", "--progress-bar", "-o", str(local_path), rom_url],
+            [curl_path, "-L", "-o", str(local_path), rom_url],
             timeout=3600,
         )
-        if proc.returncode != 0:
-            raise RuntimeError(f"Failed to download ROM from {rom_url}")
+    elif wget_path:
+        proc = subprocess.run(
+            [wget_path, "-O", str(local_path), rom_url],
+            timeout=3600,
+        )
+    else:
+        raise FileNotFoundError("Neither curl nor wget found — cannot download ROM")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to download ROM from {rom_url} (exit code {proc.returncode})")
 
     if not local_path.exists() or local_path.stat().st_size == 0:
         raise RuntimeError(f"Downloaded ROM file is empty or missing: {local_path}")
