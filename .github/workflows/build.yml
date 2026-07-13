@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       build_report: ${{ steps.report.outputs.build_report }}
+      build_success: ${{ steps.check.outputs.build_success }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,19 +37,10 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dwarves xz-utils
+          sudo apt-get install -y dwarves
 
       - name: Install vmlinux-to-elf
         run: pip install vmlinux-to-elf
-
-      - name: Install payload-dumper-go
-        run: |
-          PDG_VERSION="1.3.0"
-          curl -sL "https://github.com/ssut/payload-dumper-go/releases/download/${PDG_VERSION}/payload-dumper-go_${PDG_VERSION}_linux_amd64.tar.gz" \
-            -o /tmp/payload-dumper-go.tar.gz
-          tar xzf /tmp/payload-dumper-go.tar.gz -C /tmp payload-dumper-go
-          sudo mv /tmp/payload-dumper-go /usr/local/bin/payload-dumper-go
-          chmod +x /usr/local/bin/payload-dumper-go
 
       - name: Setup Android NDK r27
         id: setup-ndk
@@ -66,7 +58,34 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           PATH: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin:${{ env.PATH }}
-        continue-on-error: true
+
+      - name: Check build outputs
+        id: check
+        run: |
+          if [ ! -d output ]; then
+            echo "No output directory found"
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          found_preload=false
+          for device_dir in output/*/; do
+            device_name=$(basename "$device_dir")
+            if [ "$device_name" = "site" ]; then continue; fi
+            if [ -f "${device_dir}/preload.so" ]; then
+              found_preload=true
+              break
+            fi
+          done
+
+          if [ "$found_preload" = false ]; then
+            echo "No preload.so files produced — build failed"
+            echo "build_success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "Build succeeded — preload.so files found"
+          echo "build_success=true" >> $GITHUB_OUTPUT
 
       - name: Generate build report
         id: report
@@ -91,12 +110,6 @@ jobs:
           echo -e "$REPORT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Upload Pages artifact
-        if: always()
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: output/site/
-
       - name: List build outputs
         if: always()
         run: |
@@ -104,8 +117,14 @@ jobs:
           find output -type f 2>/dev/null || echo "(no output directory)"
           echo "=== Done ==="
 
+      - name: Upload Pages artifact
+        if: steps.check.outputs.build_success == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output/site/
+
       - name: Create GitHub Release
-        if: always()
+        if: steps.check.outputs.build_success == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
@@ -128,7 +147,7 @@ jobs:
 
   deploy:
     needs: build
-    if: always() && needs.build.result != 'cancelled'
+    if: needs.build.outputs.build_success == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

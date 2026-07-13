@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ..utils.bootimg_utils import detect_rom_type, find_boot_images
+from ..utils.payload_utils import extract_payload_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
 
 
 def _unpack_payload(rom_path: Path, output_dir: Path) -> Path:
-    """Unpack payload.bin using payload-dumper-go.
+    """Unpack payload.bin using Python-native payload parser.
 
     Returns:
         Path to the directory containing extracted images.
@@ -112,23 +113,12 @@ def _unpack_payload(rom_path: Path, output_dir: Path) -> Path:
     if payload_bin is None or not payload_bin.exists():
         raise FileNotFoundError("payload.bin not found in ROM")
 
-    logger.info("Extracting payload using payload-dumper-go: %s", payload_bin)
-    proc = _run_cmd(
-        ["payload-dumper-go", "-o", str(payload_dir), str(payload_bin)],
-        timeout=1800,
+    logger.info("Extracting payload using Python-native parser: %s", payload_bin)
+    extract_payload_partitions(
+        str(payload_bin),
+        str(payload_dir),
+        partition_names=["init_boot", "boot"],
     )
-    if proc.returncode != 0:
-        logger.error("payload-dumper-go failed: %s", proc.stderr)
-        # Fallback: try payload-dumper (Python version)
-        logger.info("Trying payload-dumper (Python) as fallback...")
-        proc = _run_cmd(
-            ["payload-dumper", "-o", str(payload_dir), str(payload_bin)],
-            timeout=1800,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"payload-dumper-go and payload-dumper both failed: {proc.stderr}"
-            )
 
     return payload_dir
 
