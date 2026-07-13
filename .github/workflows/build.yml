@@ -94,6 +94,13 @@ jobs:
         with:
           path: output/site/
 
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "=== Build outputs ==="
+          find output -type f 2>/dev/null || echo "(no output directory)"
+          echo "=== Done ==="
+
       - name: Create GitHub Release
         if: always()
         uses: softprops/action-gh-release@v2
@@ -113,11 +120,6 @@ jobs:
             2. Open the GitHub Pages site
             3. Import `preload.so` into the web page
             4. Get root!
-          files: |
-            output/*/preload.so
-            output/*/target.h
-            output/*/offsets.h
-            output/*/exploit.c
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
