@@ -21,10 +21,12 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_SYMBOLS: dict[str, list[str]] = {
     "INIT_TASK": ["init_task"],
+    "INIT_CRED": ["init_cred"],
     "SELINUX_ENFORCING": ["selinux_enforcing", "selinux_state"],
     "ANON_PIPE_BUF_OPS": ["anon_pipe_buf_ops"],
     "KMALLOC_CACHES": ["kmalloc_caches"],
     "NFULNL_LOGGER": ["nfulnl_logger"],
+    "SECURITY_HOOK_HEADS": ["security_hook_heads"],
     "DMA_HEAP_FOPS": ["dma_heap_fops", "dma_buf_fops"],
     "ASHMEM_FOPS": ["ashmem_fops"],
     "KIMAGE_TEXT_BASE": ["_stext", "_text", "__init_begin"],
