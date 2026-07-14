@@ -42,6 +42,100 @@ _WIRE_64BIT = 1
 _WIRE_LENGTH_DELIMITED = 2
 _WIRE_32BIT = 5
 
+# ---------------------------------------------------------------------------
+# Universal decompression dispatcher
+# Detects actual compression format from blob magic bytes.
+# This is necessary because OEMs don't always follow AOSP op_type conventions
+# (e.g. Xiaomi HyperOS puts XZ data in op_type 8 which AOSP defines as BROTLI).
+# ---------------------------------------------------------------------------
+
+# (magic_bytes, algorithm_name, min_magic_len)
+_COMPRESSION_SIGNATURES: list[tuple[bytes, str, int]] = [
+    (b"\xfd\x37\x7a\x58\x5a\x00", "xz",       6),   # XZ / LZMA
+    (b"\x1f\x8b",                  "gzip",      2),   # gzip
+    (b"\x42\x5a\x68",              "bzip2",     3),   # bzip2 (BZh)
+    (b"\x04\x22\x4d\x18",         "lz4",       4),   # LZ4 frame
+    (b"\x28\xb5\x2f\xfd",         "zstd",      4),   # Zstandard
+]
+
+
+def _detect_compression(blob: bytes) -> str | None:
+    """Detect compression format from blob magic bytes."""
+    for magic, name, min_len in _COMPRESSION_SIGNATURES:
+        if len(blob) >= min_len and blob[:min_len] == magic:
+            return name
+    return None
+
+
+def _decompress(blob: bytes, algorithm: str) -> bytes:
+    """Decompress blob using the specified algorithm."""
+    if algorithm == "xz":
+        import lzma
+        return lzma.decompress(blob)
+    elif algorithm == "gzip":
+        import gzip
+        return gzip.decompress(blob)
+    elif algorithm == "bzip2":
+        import bz2
+        return bz2.decompress(blob)
+    elif algorithm == "lz4":
+        import lz4.frame
+        return lz4.frame.decompress(blob)
+    elif algorithm == "zstd":
+        import zstandard as zstd
+        return zstd.ZstdDecompressor().decompress(blob)
+    else:
+        raise ValueError(f"Unsupported compression algorithm: {algorithm}")
+
+
+def _decompress_blob(blob: bytes, op_type: int) -> bytes:
+    """Decompress a data blob from a payload operation.
+
+    Strategy:
+    1. For op_type 0 (REPLACE) or 3 (SOURCE_COPY): raw data, no decompression
+    2. For all other op_types: detect actual format from magic bytes
+       - If magic matches a known format, use that
+       - If no magic match, try BROTLI (no magic signature) as fallback
+       - If BROTLI fails, try all algorithms in order
+
+    This approach works regardless of OEM-specific op_type misuse.
+    """
+    # Raw / no-compression operations
+    if op_type in (0, 3):
+        return blob
+
+    # Try magic-based detection first
+    detected = _detect_compression(blob)
+    if detected:
+        try:
+            return _decompress(blob, detected)
+        except Exception as e:
+            logger.warning("Detected %s but decompression failed: %s", detected, e)
+
+    # BROTLI has no magic signature, try it as fallback
+    try:
+        import brotli
+        return brotli.decompress(blob)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Last resort: try all algorithms
+    for magic, name, min_len in _COMPRESSION_SIGNATURES:
+        # Skip already-failed detected format
+        if name == detected:
+            continue
+        try:
+            return _decompress(blob, name)
+        except Exception:
+            continue
+
+    raise ValueError(
+        f"Could not decompress blob (op_type={op_type}, "
+        f"magic={blob[:16].hex() if len(blob) >= 16 else blob.hex()})"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Minimal protobuf decoder
@@ -526,40 +620,8 @@ def extract_payload_partitions(
                     fin.seek(abs_offset)
                     blob = fin.read(data_len)
 
-                    # Handle compressed operation types
-                    if op_type == 1:  # REPLACE_BZ (bzip2)
-                        import bz2
-                        blob = bz2.decompress(blob)
-                    elif op_type == 2:  # REPLACE_XZ (xz/lzma)
-                        import lzma
-                        blob = lzma.decompress(blob)
-                    elif op_type == 8:  # Documented as BROTLI, but some OEMs use XZ/LZ4 here
-                        # Xiaomi HyperOS: op_type 8 is actually XZ compressed!
-                        # Blob magic fd377a585a00 = XZ, 1f8b = gzip, 04224d18 = lz4
-                        blob_magic = blob[:6] if len(blob) >= 6 else b""
-                        if blob_magic[:6] == b"\xfd\x37\x7a\x58\x5a\x00":
-                            # XZ
-                            import lzma
-                            blob = lzma.decompress(blob)
-                        elif blob_magic[:2] == b"\x1f\x8b":
-                            # Gzip
-                            import gzip
-                            blob = gzip.decompress(blob)
-                        elif blob_magic[:4] == b"\x04\x22\x4d\x18":
-                            # LZ4 frame
-                            import lz4.frame
-                            blob = lz4.frame.decompress(blob)
-                        else:
-                            # Try BROTLI as last resort
-                            try:
-                                import brotli
-                                blob = brotli.decompress(blob)
-                            except Exception as e:
-                                logger.error("op_type 8 decompression all failed for partition %s, "
-                                             "blob magic: %s, error: %s",
-                                             name, blob[:16].hex() if len(blob) >= 16 else blob.hex(), e)
-                                continue
-                    # op_type 0 = REPLACE (raw), no decompression needed
+                    # Decompress blob (auto-detects format from magic bytes)
+                    blob = _decompress_blob(blob, op_type)
 
                     fout.seek(dst_offset)
                     fout.write(blob)
