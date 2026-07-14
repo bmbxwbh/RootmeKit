@@ -364,11 +364,23 @@ def extract_payload_partitions(
     #   field 6: dynamic_partition_metadata (message)
     partitions: list[dict] = []
     offset = 0
+
+    # Debug: dump all top-level fields in the manifest
+    logger.info("Manifest size: %d bytes, dumping top-level fields...", len(manifest_data))
     while offset < len(manifest_data):
         try:
             fn, wt, val, offset = _decode_field(manifest_data, offset)
         except (ValueError, IndexError):
             break
+        # Log every field we encounter (truncate bytes values)
+        if wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            vrepr = f"<{len(val)} bytes>"
+        elif wt == _WIRE_VARINT:
+            vrepr = str(val)
+        else:
+            vrepr = f"<wt={wt}>"
+        logger.info("  manifest field %d (wt=%d): %s", fn, wt, vrepr)
+
         if fn == 4 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             try:
                 pu = _parse_partition_update(val)
