@@ -7,12 +7,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
 
 jobs:
   build:
@@ -127,12 +121,6 @@ jobs:
           find output -type f 2>/dev/null || echo "(no output directory)"
           echo "=== Done ==="
 
-      - name: Upload Pages artifact
-        if: steps.check.outputs.build_success == 'true'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: /tmp/build/site/
-
       - name: Create GitHub Release
         if: steps.check.outputs.build_success == 'true'
         uses: softprops/action-gh-release@v2
@@ -154,20 +142,8 @@ jobs:
 
             ### Usage
             1. Download `preload.so` for your device
-            2. Open the GitHub Pages site
+            2. Open https://bmbxwbh.github.io/RootmeKit-site/
             3. Import `preload.so` into the web page
             4. Get root!
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  deploy:
-    needs: build
-    if: needs.build.outputs.build_success == 'true'
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
