@@ -138,13 +138,22 @@ def compile_exploit(
 
     output_bin = out_dir / "preload.so"
 
-    # Select compiler based on architecture
+    # Find NDK compiler
     compiler_map: dict[str, str] = {
         "aarch64": "aarch64-linux-android35-clang",
         "arm": "armv7a-linux-androideabi35-clang",
         "x86_64": "x86_64-linux-android35-clang",
     }
-    compiler = compiler_map.get(arch, "aarch64-linux-android35-clang")
+    compiler_name = compiler_map.get(arch, "aarch64-linux-android35-clang")
+
+    # Try to find the compiler — check ANDROID_NDK_HOME and common locations
+    import os
+    ndk_home = os.environ.get("ANDROID_NDK_HOME", "")
+    compiler = compiler_name
+    if ndk_home:
+        candidate = Path(ndk_home) / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin" / compiler_name
+        if candidate.exists():
+            compiler = str(candidate)
 
     logger.info("Compiling exploit with %s for %s...", compiler, arch)
 
@@ -160,7 +169,9 @@ def compile_exploit(
 
     proc = _run_cmd(cmd, cwd=str(src))
     if proc.returncode != 0:
-        logger.error("Compilation failed:\n%s\n%s", proc.stdout, proc.stderr)
+        # Print full error output — compilation errors are critical
+        error_output = proc.stderr or proc.stdout or "(no output)"
+        logger.error("Compilation failed (command: %s):\n%s", " ".join(cmd), error_output)
         return None
 
     if not output_bin.exists():
