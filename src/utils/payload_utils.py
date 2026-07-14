@@ -371,6 +371,7 @@ def extract_payload_partitions(
     #   field 15: dynamic_partition_metadata (message)
     #   field 17: apex_info (repeated message)
     partitions: list[dict] = []
+    block_size = 4096  # default, will be overridden by manifest
     offset = 0
 
     while offset < len(manifest_data):
@@ -380,6 +381,7 @@ def extract_payload_partitions(
             break
 
         if fn == 3 and wt == _WIRE_VARINT:
+            block_size = val
             logger.info("  block_size: %d", val)
         elif fn == 12 and wt == _WIRE_VARINT:
             logger.info("  minor_version: %d", val)
@@ -419,17 +421,19 @@ def extract_payload_partitions(
         out_file = out_path / f"{name}.img"
 
         # Reconstruct partition image from operations
-        # We need to know the total size to pre-allocate
         total_size = part["new_partition_size"]
+        logger.info("Partition %s: size=%d, operations=%d", name, total_size, len(part["operations"]))
 
-        # Collect all (data_offset, data_length, dst_offset, dst_length) tuples
+        # Collect all (data_offset, data_length, dst_offset, dst_length, op_type) tuples
         ops_to_write: list[tuple[int, int, int, int, int]] = []
         for op in part["operations"]:
             op_type = op["type"]
-            # Type 0 = REPLACE, 1 = REPLACE_BZ, 2 = REPLACE_XZ, 4 = SOURCE_COPY, etc.
-            # For REPLACE types, the data blob contains the actual data
-            # For ZERO/DISCARD, no data is needed
-            if op_type in (0, 1, 2, 3):  # REPLACE, REPLACE_BZ, REPLACE_XZ, ZERO
+            # AOSP InstallOperation.Type:
+            #   0=REPLACE, 1=REPLACE_BZ, 2=REPLACE_XZ, 3=SOURCE_COPY
+            #   4=SOURCE_BSDIFF, 5=ZERO, 6=DISCARD, 7=REPLACE_XZ (some variants)
+            #   8=BROTLI, 9=PUFFDIFF
+            if op_type in (0, 1, 2):
+                # REPLACE types: data blob contains the partition data
                 data_off = op["data_offset"]
                 data_len = op["data_length"]
 
@@ -437,7 +441,6 @@ def extract_payload_partitions(
                 dst_offset = 0
                 dst_length = 0
                 for ext in op["dst_extents"]:
-                    block_size = 4096  # standard block size
                     ext_start = ext["start_block"] * block_size
                     ext_len = ext["num_blocks"] * block_size
                     if dst_offset == 0 and dst_length == 0:
@@ -445,24 +448,35 @@ def extract_payload_partitions(
                     dst_length += ext_len
 
                 ops_to_write.append((data_off, data_len, dst_offset, dst_length, op_type))
-            elif op_type == 4:  # SOURCE_COPY — skip, no data blob
+            elif op_type == 3:
+                # SOURCE_COPY — data from source partition, not in blob
+                # For full OTA this means the data is already there, skip
+                logger.debug("Skipping SOURCE_COPY op for partition %s", name)
                 continue
-            elif op_type in (6, 7, 8):  # ZERO, DISCARD, REPLACE_XZ (some variants)
-                if op_type == 8 and op["data_length"] > 0:
-                    # BROTLI or similar compressed — we need the data
-                    data_off = op["data_offset"]
-                    data_len = op["data_length"]
-                    dst_offset = 0
-                    dst_length = 0
-                    for ext in op["dst_extents"]:
-                        block_size = 4096
-                        ext_start = ext["start_block"] * block_size
-                        ext_len = ext["num_blocks"] * block_size
-                        if dst_offset == 0 and dst_length == 0:
-                            dst_offset = ext_start
-                        dst_length += ext_len
-                    ops_to_write.append((data_off, data_len, dst_offset, dst_length, op_type))
-                continue
+            elif op_type in (5, 6):
+                # ZERO/DISCARD — no data needed, just zero-fill
+                dst_offset = 0
+                dst_length = 0
+                for ext in op["dst_extents"]:
+                    ext_start = ext["start_block"] * block_size
+                    ext_len = ext["num_blocks"] * block_size
+                    if dst_offset == 0 and dst_length == 0:
+                        dst_offset = ext_start
+                    dst_length += ext_len
+                ops_to_write.append((0, 0, dst_offset, dst_length, op_type))
+            elif op_type == 8:
+                # BROTLI compressed
+                data_off = op["data_offset"]
+                data_len = op["data_length"]
+                dst_offset = 0
+                dst_length = 0
+                for ext in op["dst_extents"]:
+                    ext_start = ext["start_block"] * block_size
+                    ext_len = ext["num_blocks"] * block_size
+                    if dst_offset == 0 and dst_length == 0:
+                        dst_offset = ext_start
+                    dst_length += ext_len
+                ops_to_write.append((data_off, data_len, dst_offset, dst_length, op_type))
             else:
                 logger.debug(
                     "Skipping operation type %d for partition %s",
@@ -473,6 +487,13 @@ def extract_payload_partitions(
             logger.warning("No extractable operations for partition %s", name)
             continue
 
+        # Log first few operations for debugging
+        for i, (doff, dlen, dst_off, dst_len, otype) in enumerate(ops_to_write[:5]):
+            logger.debug("  op[%d]: type=%d data_offset=%d data_len=%d dst_offset=%d dst_len=%d",
+                         i, otype, doff, dlen, dst_off, dst_len)
+        if len(ops_to_write) > 5:
+            logger.debug("  ... and %d more operations", len(ops_to_write) - 5)
+
         # Write partition image using seek/read on the payload file
         try:
             with open(payload_path, "rb") as fin, open(out_file, "wb") as fout:
@@ -480,6 +501,12 @@ def extract_payload_partitions(
                     fout.truncate(total_size)
 
                 for data_off, data_len, dst_offset, dst_length, op_type in ops_to_write:
+                    if op_type in (5, 6):
+                        # ZERO/DISCARD — write zeros
+                        fout.seek(dst_offset)
+                        fout.write(b"\x00" * dst_length)
+                        continue
+
                     abs_offset = data_blob_start + data_off
                     if abs_offset + data_len > file_size:
                         logger.error(
@@ -499,6 +526,13 @@ def extract_payload_partitions(
                     elif op_type == 2:  # REPLACE_XZ (xz/lzma)
                         import lzma
                         blob = lzma.decompress(blob)
+                    elif op_type == 8:  # BROTLI
+                        try:
+                            import brotli
+                            blob = brotli.decompress(blob)
+                        except ImportError:
+                            logger.error("BROTLI decompression requires brotli package")
+                            continue
                     # op_type 0 = REPLACE (raw), no decompression needed
 
                     fout.seek(dst_offset)

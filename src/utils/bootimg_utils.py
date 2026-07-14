@@ -294,9 +294,73 @@ def unpack_bootimg(boot_img_path: str | Path, output_dir: str | Path) -> Path | 
         logger.info("Unpacked boot image, kernel at: %s", kernel_path)
         return kernel_path
 
+    # Try Samsung/other vendor formats — scan for kernel magic signatures
+    # ARM64 Linux kernel Image starts with these bytes
+    _ARM64_IMAGE_MAGIC = b"\x6d\x7d\x6d\x6e"  # "mdm\0" at offset 4 in ARM64 Image header
+    _ARM64_IMAGE_MAGIC2 = b"\x00\x00\x00\x00\x6d\x7d"  # Alternative: zeros then magic
+    # GZIP magic
+    _GZIP_MAGIC = b"\x1f\x8b"
+    # LZ4 magic
+    _LZ4_MAGIC = b"\x04\x22\x4d\x18"
+    # XZ magic
+    _XZ_MAGIC = b"\xfd\x37\x7a\x58\x5a\x00"
+
+    logger.info("Standard ANDROID! boot image parser failed, scanning for kernel signatures...")
+    try:
+        with open(boot_img, "rb") as f:
+            data = f.read(min(boot_img.stat().st_size, 2 * 1024 * 1024))  # Read first 2MB
+
+        # Dump first 64 bytes for debugging
+        logger.info("Boot image first 32 bytes: %s", data[:32].hex())
+        logger.info("Boot image first 16 bytes raw: %s", data[:16])
+
+        # Strategy: scan through the file looking for known kernel signatures
+        scan_offsets = []
+
+        # Check for Samsung PIT/Vendor boot format — kernel may start at a fixed offset
+        # Try common page-aligned offsets
+        for offset in range(0, min(len(data), 65536), 512):
+            chunk = data[offset:offset + 8]
+            if len(chunk) < 4:
+                continue
+            # ARM64 Image header: bytes [4:8] should be 0x644d5241 ("ARM\x64" in LE) or similar
+            if chunk[0:4] == _GZIP_MAGIC:
+                scan_offsets.append(("gzip", offset))
+            elif chunk[0:4] == _LZ4_MAGIC:
+                scan_offsets.append(("lz4", offset))
+            elif chunk[0:6] == _XZ_MAGIC:
+                scan_offsets.append(("xz", offset))
+            # ARM64 kernel: at offset+4, check for magic 0x644d5241
+            elif len(data) > offset + 8:
+                arm_magic = data[offset + 4:offset + 8]
+                if arm_magic == b"\x41\x52\x4d\x64":  # "ARMd" = ARM64 Image magic
+                    scan_offsets.append(("arm64_image", offset))
+
+        if scan_offsets:
+            logger.info("Found kernel signatures at: %s", scan_offsets[:5])
+
+            # Use the first match
+            ktype, koffset = scan_offsets[0]
+
+            # For compressed kernels, extract from that offset to end of file
+            with open(boot_img, "rb") as f:
+                f.seek(koffset)
+                kernel_data = f.read()
+
+            kernel_out = out_dir / "kernel"
+            with open(kernel_out, "wb") as f:
+                f.write(kernel_data)
+
+            logger.info("Extracted %s kernel at offset %d (%d bytes): %s",
+                        ktype, koffset, len(kernel_data), kernel_out)
+            return kernel_out
+
+    except Exception as e:
+        logger.error("Kernel signature scan failed: %s", e)
+
     # Fallback: Manual extraction with known header sizes
     # This is the old approach kept as a secondary fallback
-    logger.info("Python boot image parser failed, trying manual header-size extraction")
+    logger.info("Kernel signature scan failed, trying manual header-size extraction")
     header_sizes = [1648, 1580, 1660, 4096]
     for hs in header_sizes:
         kernel_out = out_dir / "kernel"
