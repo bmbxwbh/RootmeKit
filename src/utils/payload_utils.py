@@ -533,26 +533,31 @@ def extract_payload_partitions(
                     elif op_type == 2:  # REPLACE_XZ (xz/lzma)
                         import lzma
                         blob = lzma.decompress(blob)
-                    elif op_type == 8:  # BROTLI or LZ4 (some OEMs use this for LZ4)
-                        # Try BROTLI first
-                        try:
-                            import brotli
-                            blob = brotli.decompress(blob)
-                        except ImportError:
-                            pass
-                        except Exception as brotli_err:
-                            logger.warning("BROTLI decompression failed for partition %s: %s, blob first 16 bytes: %s",
-                                           name, brotli_err, blob[:16].hex() if len(blob) >= 16 else blob.hex())
-                            # BROTLI failed, try LZ4
+                    elif op_type == 8:  # Documented as BROTLI, but some OEMs use XZ/LZ4 here
+                        # Xiaomi HyperOS: op_type 8 is actually XZ compressed!
+                        # Blob magic fd377a585a00 = XZ, 1f8b = gzip, 04224d18 = lz4
+                        blob_magic = blob[:6] if len(blob) >= 6 else b""
+                        if blob_magic[:6] == b"\xfd\x37\x7a\x58\x5a\x00":
+                            # XZ
+                            import lzma
+                            blob = lzma.decompress(blob)
+                        elif blob_magic[:2] == b"\x1f\x8b":
+                            # Gzip
+                            import gzip
+                            blob = gzip.decompress(blob)
+                        elif blob_magic[:4] == b"\x04\x22\x4d\x18":
+                            # LZ4 frame
+                            import lz4.frame
+                            blob = lz4.frame.decompress(blob)
+                        else:
+                            # Try BROTLI as last resort
                             try:
-                                import lz4.frame
-                                blob = lz4.frame.decompress(blob)
-                            except ImportError:
-                                logger.error("BROTLI failed and lz4 not available for partition %s", name)
-                                continue
-                            except Exception as lz4e:
-                                logger.error("Both BROTLI and LZ4 failed for partition %s: brotli=%s, lz4=%s",
-                                             name, brotli_err, lz4e)
+                                import brotli
+                                blob = brotli.decompress(blob)
+                            except Exception as e:
+                                logger.error("op_type 8 decompression all failed for partition %s, "
+                                             "blob magic: %s, error: %s",
+                                             name, blob[:16].hex() if len(blob) >= 16 else blob.hex(), e)
                                 continue
                     # op_type 0 = REPLACE (raw), no decompression needed
 
