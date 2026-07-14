@@ -172,8 +172,7 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
 
         _cleanup(
             device_work / "cache",
-            device_work / "unpacked",
-            label="Stage 1-2: ROM + partitions",
+            label="Stage 1-2: ROM download cache",
         )
     except Exception as e:
         logger.error("[Stage 1-2] FAILED: %s", e)
