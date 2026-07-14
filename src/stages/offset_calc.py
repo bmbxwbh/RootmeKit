@@ -55,14 +55,14 @@ TARGET_H_TEMPLATE = Template("""\
 {% if offsets %}
 /* Symbol addresses */
 {% for name, value in offsets.items() %}
-#define {{ name }}\t0x{{ "0" if value == 0 else format(value, 'x') }}
+#define {{ name }}\t0x{{ "0" if value == 0 else "%x" | format(value) }}
 {% endfor %}
 {% endif %}
 
 {% if layout %}
 /* Memory layout */
 {% for name, value in layout.items() %}
-#define {{ name }}\t0x{{ "0" if value == 0 else format(value, 'x') }}
+#define {{ name }}\t0x{{ "0" if value == 0 else "%x" | format(value) }}
 {% endfor %}
 {% endif %}
 
@@ -94,7 +94,7 @@ OFFSETS_H_TEMPLATE = Template("""\
 /* Resolved symbol offsets */
 {% for name, info in offsets.items() %}
 /* Source: {{ info.source }} */
-#define {{ name }}\t0x{{ "0" if info.value == 0 else format(info.value, 'x') }}
+#define {{ name }}\t0x{{ "0" if info.value == 0 else "%x" | format(info.value) }}
 
 {% endfor %}
 {% endif %}
