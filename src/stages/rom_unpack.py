@@ -2,6 +2,11 @@
 
 Downloads the ROM from the provided URL, detects the ROM format,
 and unpacks it to extract boot images.
+
+Uses mature external tools:
+  - payload-dumper-go: extract partition images from OTA payload.bin
+  - magiskboot: unpack boot.img / init_boot.img to raw kernel
+  - vmlinux-to-elf: convert raw kernel Image to ELF with symbols
 """
 
 from __future__ import annotations
@@ -13,9 +18,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from ..utils.bootimg_utils import detect_rom_type, find_boot_images
-from ..utils.payload_utils import extract_payload_partitions
-
 logger = logging.getLogger(__name__)
 
 
@@ -26,8 +28,13 @@ def _run_cmd(
     cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess command and return the result."""
-    logger.debug("Running: %s", " ".join(cmd))
+    logger.info("Running: %s", " ".join(cmd))
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+
+
+def _tool_available(name: str) -> bool:
+    """Check if an external tool is available on PATH."""
+    return shutil.which(name) is not None
 
 
 def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
@@ -82,8 +89,96 @@ def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
     return local_path
 
 
+# ---------------------------------------------------------------------------
+# payload.bin extraction — using payload-dumper-go (preferred) or Python fallback
+# ---------------------------------------------------------------------------
+
+def _extract_payload_with_dumper_go(payload_bin: Path, output_dir: Path, partitions: list[str]) -> bool:
+    """Extract partition images using payload-dumper-go.
+
+    Args:
+        payload_bin: Path to payload.bin file.
+        output_dir: Output directory for extracted images.
+        partitions: List of partition names to extract.
+
+    Returns:
+        True if extraction succeeded.
+    """
+    if not _tool_available("payload-dumper-go"):
+        logger.warning("payload-dumper-go not available, will use Python fallback")
+        return False
+
+    # payload-dumper-go -o <output_dir> -p <part1,part2,...> <payload.bin>
+    part_arg = ",".join(partitions)
+    try:
+        proc = _run_cmd(
+            ["payload-dumper-go", "-o", str(output_dir), "-p", part_arg, str(payload_bin)],
+            timeout=3600,
+        )
+        if proc.returncode != 0:
+            logger.error("payload-dumper-go failed: %s", proc.stderr)
+            return False
+        logger.info("payload-dumper-go output:\n%s", proc.stdout[-2000:] if len(proc.stdout) > 2000 else proc.stdout)
+        return True
+    except Exception as e:
+        logger.error("payload-dumper-go exception: %s", e)
+        return False
+
+
+def _extract_payload_python(payload_bin: Path, output_dir: Path, partitions: list[str]) -> bool:
+    """Extract partition images using Python-native payload parser (fallback).
+
+    Returns:
+        True if extraction succeeded.
+    """
+    from ..utils.payload_utils import extract_payload_partitions
+
+    try:
+        extract_payload_partitions(
+            str(payload_bin),
+            str(output_dir),
+            partition_names=partitions,
+        )
+        return True
+    except Exception as e:
+        logger.error("Python payload parser failed: %s", e)
+        return False
+
+
+def _find_payload_bin(rom_path: Path, output_dir: Path) -> Path | None:
+    """Find payload.bin from ROM path. Extracts from zip if needed.
+
+    Returns:
+        Path to payload.bin or None if not found.
+    """
+    if rom_path.is_dir():
+        candidates = list(rom_path.glob("**/payload.bin"))
+        return candidates[0] if candidates else None
+
+    if rom_path.suffix.lower() == ".zip":
+        # Extract payload.bin from zip
+        zip_dir = output_dir / "zip_extract"
+        zip_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("Extracting payload.bin from zip: %s", rom_path)
+        with zipfile.ZipFile(rom_path, "r") as zf:
+            # Find payload.bin entry
+            payload_entries = [n for n in zf.namelist() if n.endswith("payload.bin")]
+            if not payload_entries:
+                return None
+            # Extract just the payload.bin
+            for entry in payload_entries:
+                zf.extract(entry, zip_dir)
+            return zip_dir / payload_entries[0]
+
+    # Assume it's payload.bin directly
+    if rom_path.exists():
+        return rom_path
+
+    return None
+
+
 def _unpack_payload(rom_path: Path, output_dir: Path, kernel_partition: str | None = None) -> Path:
-    """Unpack payload.bin using Python-native payload parser.
+    """Unpack payload.bin using payload-dumper-go (preferred) or Python fallback.
 
     Args:
         rom_path: Path to the ROM file.
@@ -99,100 +194,192 @@ def _unpack_payload(rom_path: Path, output_dir: Path, kernel_partition: str | No
     payload_dir.mkdir(parents=True, exist_ok=True)
 
     # Find payload.bin
-    payload_bin: Path | None = None
-    if rom_path.is_dir():
-        candidates = list(rom_path.glob("**/payload.bin"))
-        if candidates:
-            payload_bin = candidates[0]
-    elif rom_path.suffix.lower() == ".zip":
-        # Extract zip first
-        zip_dir = output_dir / "zip_extract"
-        zip_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Extracting zip: %s", rom_path)
-        with zipfile.ZipFile(rom_path, "r") as zf:
-            zf.extractall(zip_dir)
-        candidates = list(zip_dir.glob("**/payload.bin"))
-        if candidates:
-            payload_bin = candidates[0]
-    else:
-        payload_bin = rom_path
-
+    payload_bin = _find_payload_bin(rom_path, output_dir)
     if payload_bin is None or not payload_bin.exists():
         raise FileNotFoundError("payload.bin not found in ROM")
 
     # Determine which partitions to extract
     if kernel_partition:
-        # User specified the kernel partition explicitly
         partition_names = [kernel_partition]
     else:
-        # Auto-detect: try init_boot first (GKI), then boot, then vendor_boot
         partition_names = ["init_boot", "boot", "vendor_boot"]
 
-    logger.info("Extracting payload using Python-native parser: %s (partitions: %s)", payload_bin, partition_names)
-    extract_payload_partitions(
-        str(payload_bin),
-        str(payload_dir),
-        partition_names=partition_names,
-    )
+    logger.info("Extracting partitions %s from payload: %s", partition_names, payload_bin)
+
+    # Try payload-dumper-go first (mature, handles all compression)
+    success = _extract_payload_with_dumper_go(payload_bin, payload_dir, partition_names)
+
+    # Fallback to Python-native parser
+    if not success:
+        logger.info("Falling back to Python-native payload parser")
+        success = _extract_payload_python(payload_bin, payload_dir, partition_names)
+
+    if not success:
+        raise RuntimeError("All payload extraction methods failed")
 
     return payload_dir
 
 
-def _unpack_ozip(rom_path: Path, output_dir: Path) -> Path:
-    """Decrypt OPPO ozip and treat as payload.
+# ---------------------------------------------------------------------------
+# boot.img unpacking — using magiskboot (preferred) or Python fallback
+# ---------------------------------------------------------------------------
+
+def _unpack_bootimg_magiskboot(boot_img: Path, out_dir: Path) -> Path | None:
+    """Unpack boot image using magiskboot.
+
+    magiskboot unpack extracts: kernel, ramdisk.cpio, etc.
+    The kernel file is the raw (decompressed) kernel Image.
 
     Returns:
-        Path to the extracted payload directory.
+        Path to the extracted kernel file, or None if failed.
     """
-    logger.info("Decrypting OPPO ozip: %s", rom_path)
+    if not _tool_available("magiskboot"):
+        logger.warning("magiskboot not available, will use Python fallback")
+        return None
 
-    # Try oppo_ozip_decrypt or ozip_decrypt
+    # magiskboot unpack works in the current directory
+    work_dir = out_dir / "magiskboot_unpack"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        proc = _run_cmd(
+            ["magiskboot", "unpack", "-n", "-h", str(boot_img)],
+            cwd=work_dir,
+            timeout=120,
+        )
+        # magiskboot returns 0 for valid boot images
+        if proc.returncode not in (0, 2):
+            logger.error("magiskboot unpack failed (rc=%d): %s", proc.returncode, proc.stderr)
+            return None
+
+        logger.info("magiskboot output:\n%s", proc.stdout)
+
+        # magiskboot extracts 'kernel' file (decompressed)
+        kernel_file = work_dir / "kernel"
+        if kernel_file.exists() and kernel_file.stat().st_size > 0:
+            # Copy to standard location
+            dest = out_dir / "kernel"
+            shutil.copy2(kernel_file, dest)
+            logger.info("magiskboot extracted kernel: %s (%d bytes)", dest, dest.stat().st_size)
+            return dest
+
+        logger.error("magiskboot did not produce kernel file")
+        return None
+
+    except Exception as e:
+        logger.error("magiskboot exception: %s", e)
+        return None
+
+
+def _unpack_bootimg_python(boot_img: Path, out_dir: Path) -> Path | None:
+    """Unpack boot image using Python-native parser (fallback).
+
+    Returns:
+        Path to the extracted kernel file, or None if failed.
+    """
+    from ..utils.bootimg_utils import unpack_boot_image
+
+    try:
+        return unpack_boot_image(boot_img, out_dir)
+    except Exception as e:
+        logger.error("Python boot image parser failed: %s", e)
+        return None
+
+
+def unpack_boot_img(boot_img: Path, out_dir: Path) -> Path | None:
+    """Unpack boot image to extract kernel, using magiskboot (preferred) or Python fallback.
+
+    Returns:
+        Path to the extracted raw kernel Image file.
+    """
+    logger.info("Unpacking boot image: %s", boot_img)
+
+    # Try magiskboot first — it handles all formats and compression natively
+    kernel_path = _unpack_bootimg_magiskboot(boot_img, out_dir)
+    if kernel_path:
+        return kernel_path
+
+    # Fallback to Python-native parser
+    logger.info("Falling back to Python-native boot image parser")
+    return _unpack_bootimg_python(boot_img, out_dir)
+
+
+# ---------------------------------------------------------------------------
+# ROM type detection
+# ---------------------------------------------------------------------------
+
+def detect_rom_type(rom_path: Path) -> str:
+    """Detect ROM type from file magic/extension."""
+    if rom_path.is_dir():
+        return "directory"
+
+    name = rom_path.name.lower()
+
+    if name.endswith(".ozip"):
+        return "ozip"
+    if name.endswith(".pac"):
+        return "pac"
+
+    # Check if it's a boot image directly
+    try:
+        with open(rom_path, "rb") as f:
+            magic = f.read(16)
+        if magic[:8] == b"ANDROID!":
+            return "boot_img"
+        # ARM64 Image header
+        if len(magic) >= 8 and magic[4:8] == b"\x41\x52\x4d\x64":
+            return "raw_kernel"
+    except Exception:
+        pass
+
+    # Default: treat .zip as payload-based OTA
+    if name.endswith(".zip"):
+        return "payload"
+
+    return "unknown"
+
+
+def find_boot_images(directory: Path) -> dict[str, Path]:
+    """Find boot.img and init_boot.img in a directory tree."""
+    result: dict[str, Path] = {}
+    for f in directory.glob("**/*"):
+        name = f.name.lower()
+        if name == "init_boot.img":
+            result["init_boot"] = f
+        elif name == "boot.img":
+            result["boot"] = f
+        elif name == "vendor_boot.img":
+            result["vendor_boot"] = f
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main unpack logic
+# ---------------------------------------------------------------------------
+
+def _unpack_ozip(rom_path: Path, output_dir: Path) -> Path:
+    """Decrypt OPPO ozip and treat as payload."""
     decrypted_dir = output_dir / "ozip_decrypt"
     decrypted_dir.mkdir(parents=True, exist_ok=True)
     decrypted_zip = decrypted_dir / rom_path.with_suffix(".zip").name
 
-    # Try ozip_decrypt tool
-    proc = _run_cmd(
-        ["ozip-decrypt", str(rom_path), str(decrypted_zip)],
-        timeout=600,
-    )
+    proc = _run_cmd(["ozip-decrypt", str(rom_path), str(decrypted_zip)], timeout=600)
     if proc.returncode != 0:
-        # Try Python-based decrypt
-        proc = _run_cmd(
-            ["python3", "-m", "oppo_ozip", str(rom_path), str(decrypted_zip)],
-            timeout=600,
-        )
+        proc = _run_cmd(["python3", "-m", "oppo_ozip", str(rom_path), str(decrypted_zip)], timeout=600)
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to decrypt ozip: {proc.stderr}")
 
-    # Now treat the decrypted zip as a payload ROM
     return _unpack_payload(decrypted_zip, output_dir)
 
 
 def _unpack_pac(rom_path: Path, output_dir: Path) -> Path:
-    """Unpack Samsung PAC file.
-
-    Returns:
-        Path to the directory containing extracted images.
-    """
+    """Unpack Samsung PAC file."""
     pac_dir = output_dir / "pac_extract"
     pac_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Unpacking Samsung PAC: %s", rom_path)
-    # Samsung PAC files can be extracted with samfirm or similar tools
-    proc = _run_cmd(
-        ["samfirm", "extract", "-i", str(rom_path), "-o", str(pac_dir)],
-        timeout=1800,
-    )
+    proc = _run_cmd(["samfirm", "extract", "-i", str(rom_path), "-o", str(pac_dir)], timeout=1800)
     if proc.returncode != 0:
-        # Try with parse_pac or manual extraction
-        logger.warning("samfirm failed, trying manual PAC extraction")
-        proc = _run_cmd(
-            ["python3", "-m", "pacparser", str(rom_path), str(pac_dir)],
-            timeout=1800,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(f"Failed to unpack PAC file: {proc.stderr}")
+        raise RuntimeError(f"Failed to unpack PAC file: {proc.stderr}")
 
     return pac_dir
 
@@ -204,8 +391,6 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path, kernel_partition: s
         rom_path: Path to the ROM file or directory.
         output_dir: Directory to extract into.
         kernel_partition: Which partition contains the kernel.
-            "init_boot" for Android 13+ GKI, "boot" for older devices.
-            None means auto-detect.
 
     Returns:
         dict with keys: 'rom_type', 'unpack_dir', 'boot_img_path', 'init_boot_img_path'
@@ -234,15 +419,18 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path, kernel_partition: s
         unpack_dir = _unpack_pac(rom, out_dir)
         result["unpack_dir"] = unpack_dir
     elif rom_type == "boot_img":
-        # Direct boot image - just copy to output dir
         dest = out_dir / rom.name
         if rom != dest:
             shutil.copy2(rom, dest)
         result["unpack_dir"] = out_dir
         result["boot_img_path"] = dest
         return result
+    elif rom_type == "raw_kernel":
+        dest = out_dir / "kernel"
+        shutil.copy2(rom, dest)
+        result["unpack_dir"] = out_dir
+        return result
     else:
-        logger.error("Unknown ROM type, cannot unpack: %s", rom)
         # Last resort: try as a zip file
         if rom.suffix.lower() == ".zip":
             try:
@@ -269,8 +457,7 @@ def run(device_config: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
 
     Args:
         device_config: Device configuration dict with 'rom_url' key.
-            Optional 'kernel_partition' key specifies which partition
-            contains the kernel ("boot" or "init_boot").
+            Optional 'kernel_partition' key.
         work_dir: Working directory for downloads and extraction.
 
     Returns:

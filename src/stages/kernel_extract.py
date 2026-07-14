@@ -13,8 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..utils.bootimg_utils import unpack_bootimg
 from ..utils.elf_utils import detect_arch, extract_kernel_version, has_symbols
+from .rom_unpack import unpack_boot_img
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,8 @@ def _run_cmd(cmd: list[str], *, timeout: int = 300) -> subprocess.CompletedProce
 
 def extract_kernel(boot_img_path: str | Path, output_dir: str | Path) -> Path | None:
     """Unpack boot.img and get the raw kernel Image.
+
+    Uses magiskboot (preferred) or Python fallback via rom_unpack.unpack_boot_img.
 
     Args:
         boot_img_path: Path to the boot image file.
@@ -45,18 +47,10 @@ def extract_kernel(boot_img_path: str | Path, output_dir: str | Path) -> Path | 
 
     logger.info("Extracting kernel from boot image: %s", boot_img)
 
-    kernel_path = unpack_bootimg(boot_img, out_dir)
+    kernel_path = unpack_boot_img(boot_img, out_dir)
     if kernel_path and kernel_path.exists():
         logger.info("Raw kernel extracted: %s", kernel_path)
         return kernel_path
-
-    # Fallback: try direct extraction with vmlinux-to-elf which can also unpack
-    logger.info("Trying vmlinux-to-elf direct extraction...")
-    output_elf = out_dir / "vmlinux"
-    proc = _run_cmd(["vmlinux-to-elf", str(boot_img), str(output_elf)])
-    if proc.returncode == 0 and output_elf.exists():
-        logger.info("Direct vmlinux-to-elf extraction succeeded: %s", output_elf)
-        return output_elf
 
     logger.error("Failed to extract kernel from boot image")
     return None

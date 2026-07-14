@@ -37,6 +37,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dwarves
 
+      - name: Install payload-dumper-go
+        run: |
+          curl -sL https://github.com/ssut/payload-dumper-go/releases/download/v1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz | tar xz -C /usr/local/bin payload-dumper-go
+
+      - name: Install magiskboot
+        run: |
+          curl -sL https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk -o /tmp/magisk.apk
+          unzip -j /tmp/magisk.apk lib/x86_64/libmagiskboot.so -d /tmp/magisk_extract
+          mv /tmp/magisk_extract/libmagiskboot.so /usr/local/bin/magiskboot
+          chmod +x /usr/local/bin/magiskboot
+          magiskboot -v
+
       - name: Install vmlinux-to-elf
         run: pip install vmlinux-to-elf
 
