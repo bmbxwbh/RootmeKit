@@ -152,8 +152,11 @@ def run(prev_result: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     boot_img_path = prev_result.get("boot_img_path")
     init_boot_img_path = prev_result.get("init_boot_img_path")
 
-    # Determine primary kernel image: prefer init_boot (GKI), fallback to boot
-    primary_img_path = init_boot_img_path or boot_img_path
+    # Determine primary kernel image
+    # For GKI: kernel lives in boot.img, init_boot.img only has ramdisk
+    # For non-GKI: kernel lives in boot.img
+    # Always use boot.img as the kernel source
+    primary_img_path = boot_img_path or init_boot_img_path
 
     result: dict[str, Any] = {
         "vmlinux_path": None,
@@ -171,16 +174,6 @@ def run(prev_result: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     if kernel_image is None:
         logger.error("Failed to extract kernel from boot image")
         return result
-
-    # If init_boot.img exists, also extract its kernel (it's the actual GKI kernel)
-    if init_boot_img_path:
-        init_boot = Path(init_boot_img_path) if isinstance(init_boot_img_path, str) else init_boot_img_path
-        if init_boot.exists():
-            init_extract_dir = extract_dir / "init_boot"
-            init_kernel = extract_kernel(init_boot, init_extract_dir)
-            if init_kernel:
-                logger.info("Using init_boot kernel (GKI) as primary kernel")
-                kernel_image = init_kernel
 
     # Step 2: Convert to ELF
     vmlinux_path = convert_to_elf(kernel_image, extract_dir)
