@@ -21,6 +21,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_path(path: Path) -> None:
+    """Remove file or directory to free disk space."""
+    try:
+        if path.is_dir():
+            shutil.rmtree(path)
+            logger.info("[Cleanup] Removed dir: %s", path)
+        elif path.is_file():
+            path.unlink()
+            logger.info("[Cleanup] Removed file: %s", path)
+    except OSError as e:
+        logger.debug("[Cleanup] Failed to remove %s: %s", path, e)
+
+
 def _run_cmd(
     cmd: list[str],
     *,
@@ -189,6 +202,7 @@ def _find_payload_bin(rom_path: Path, output_dir: Path) -> Path | None:
             # Extract just the payload.bin
             for entry in payload_entries:
                 zf.extract(entry, zip_dir)
+            logger.info("Extracted payload.bin from zip")
             return zip_dir / payload_entries[0]
 
     # Assume it's payload.bin directly
@@ -237,6 +251,10 @@ def _unpack_payload(rom_path: Path, output_dir: Path, kernel_partition: str | No
 
     if not success:
         raise RuntimeError("All payload extraction methods failed")
+
+    zip_dir = output_dir / "zip_extract"
+    _cleanup_path(zip_dir)
+    _cleanup_path(rom_path)
 
     return payload_dir
 
@@ -470,6 +488,11 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path, kernel_partition: s
         boot_images = find_boot_images(result["unpack_dir"])
         result["boot_img_path"] = boot_images.get("boot")
         result["init_boot_img_path"] = boot_images.get("init_boot")
+
+        # Clean up unneeded partitions to save disk
+        for key in ("vendor_boot",):
+            if key in boot_images:
+                _cleanup_path(boot_images[key])
 
     return result
 
