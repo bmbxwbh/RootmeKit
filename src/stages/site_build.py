@@ -29,12 +29,23 @@ def run(all_device_results: dict[str, dict[str, Any]], work_dir: str | Path) -> 
     site_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy static site files from site/ directory
-    src_site = Path(__file__).parent.parent.parent / "site"
-    if src_site.exists():
+    # Try multiple strategies to find the project root / site directory
+    src_site = None
+    candidates = [
+        Path(__file__).parent.parent.parent / "site",  # src/stages/../../site = project_root/site
+        Path.cwd() / "site",  # current working directory
+    ]
+    for candidate in candidates:
+        logger.debug("Checking site path: %s (exists=%s)", candidate, candidate.exists())
+        if candidate.exists() and any(candidate.iterdir()):
+            src_site = candidate
+            break
+
+    if src_site:
         for item in src_site.iterdir():
             if item.is_file():
                 shutil.copy2(item, site_dir / item.name)
-                logger.debug("Copied %s -> %s", item, site_dir / item.name)
+                logger.info("Copied %s -> %s", item.name, site_dir / item.name)
 
     # Ensure index.html exists (GitHub Pages root needs it)
     if not (site_dir / "index.html").exists():
