@@ -58,8 +58,10 @@ class BuildResult:
 class DeviceConfig:
     """Parsed from YAML config for a single device.
 
-    Only rom_url is required. name is auto-generated
-    from the ROM filename if not provided.
+    Accepts 'url' (preferred) or 'rom_url' (legacy).
+    name is auto-generated from the URL filename if not provided.
+    Input type (ROM vs boot image) is auto-detected from the downloaded
+    file extension in rom_unpack — not from the URL.
     kernel_partition specifies which partition contains the kernel:
       - "init_boot" for Android 13+ GKI devices
       - "boot" for older devices (Android 12 and earlier)
@@ -68,36 +70,34 @@ class DeviceConfig:
 
     name: str
     display_name: str
-    rom_url: str
+    url: str
     kernel_partition: str | None = None
     manual_offsets: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DeviceConfig:
-        """Create DeviceConfig from a dict (parsed from YAML).
-
-        Auto-generates name from rom_url if not provided.
-        """
-        rom_url = data.get("rom_url", "")
-        # Auto-generate name from ROM URL filename
-        filename = rom_url.split("/")[-1].split("?")[0] if rom_url else "unknown"
-        # Clean filename to be a valid directory name
+        """Create DeviceConfig from a dict (parsed from YAML)."""
         import re
-        auto_name = re.sub(r"[^a-zA-Z0-9_-]", "_", filename.rstrip(".zip").rstrip(".ozip").rstrip(".pac"))
+
+        url = data.get("url") or data.get("rom_url") or ""
+        if not url:
+            raise ValueError("Device config must have 'url' or 'rom_url'")
+
+        filename = url.split("/")[-1].split("?")[0] if url else "unknown"
+        auto_name = re.sub(r"[^a-zA-Z0-9_-]", "_", filename.rsplit(".", 1)[0])
         if not auto_name:
             auto_name = "device"
 
         name = data.get("name") or auto_name
         display_name = name.replace("_", " ")
 
-        # Parse manual_offsets from string to int
         manual_offsets: dict[str, int] = {}
         raw_offsets = data.get("manual_offsets", {})
         if raw_offsets:
             for k, v in raw_offsets.items():
                 if isinstance(v, str):
                     try:
-                        manual_offsets[k] = int(v, 0)  # supports 0x hex and decimal
+                        manual_offsets[k] = int(v, 0)
                     except ValueError:
                         logger.warning("Invalid manual offset value for %s: %s", k, v)
                 elif isinstance(v, int):
@@ -108,7 +108,7 @@ class DeviceConfig:
         return cls(
             name=name,
             display_name=display_name,
-            rom_url=rom_url,
+            url=url,
             kernel_partition=kernel_partition,
             manual_offsets=manual_offsets,
         )
@@ -142,9 +142,9 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
 
     # ── Stage 1-2: ROM Download & Unpack ──────────────────────────────
     try:
-        logger.info("[Stage 1-2] Downloading and unpacking ROM...")
+        logger.info("[Stage 1-2] Downloading and unpacking...")
         device_dict = {
-            "rom_url": device_config.rom_url,
+            "url": device_config.url,
             "kernel_partition": device_config.kernel_partition,
         }
         unpack_result = rom_unpack_run(device_dict, device_work)

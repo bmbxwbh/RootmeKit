@@ -477,8 +477,13 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path, kernel_partition: s
 def run(device_config: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     """Main entry point for ROM download and unpack stage.
 
+    Downloads the file first, then auto-detects type from the actual
+    downloaded filename extension:
+      - .img/.bin → boot/init_boot image (skip ROM extraction)
+      - .zip/.ozip/.pac → ROM (full extraction pipeline)
+
     Args:
-        device_config: Device configuration dict with 'rom_url' key.
+        device_config: Device configuration dict with 'rom_url' or 'url' key.
             Optional 'kernel_partition' key.
         work_dir: Working directory for downloads and extraction.
 
@@ -489,16 +494,34 @@ def run(device_config: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     cache_dir = work / "cache"
     unpack_dir = work / "unpacked"
 
-    rom_url = device_config.get("rom_url")
+    rom_url = device_config.get("rom_url") or device_config.get("url")
     if not rom_url:
-        raise ValueError("device_config must contain 'rom_url'")
+        raise ValueError("device_config must contain 'rom_url' or 'url'")
 
     kernel_partition = device_config.get("kernel_partition")
 
     # Stage 1: Download
     rom_path = download_rom(rom_url, cache_dir)
 
-    # Stage 2: Unpack
+    # Auto-detect from downloaded file extension
+    file_ext = rom_path.suffix.lower().lstrip(".")
+    if file_ext in ("img", "bin"):
+        logger.info("Detected boot image file: %s (skipping ROM unpack)", rom_path.name)
+        img_name = rom_path.name.lower()
+        if "init_boot" in img_name:
+            return {
+                "boot_img_path": None,
+                "init_boot_img_path": str(rom_path),
+                "rom_type": "boot_img",
+            }
+        else:
+            return {
+                "boot_img_path": str(rom_path),
+                "init_boot_img_path": None,
+                "rom_type": "boot_img",
+            }
+
+    # Stage 2: Unpack ROM
     result = unpack_rom(rom_path, unpack_dir, kernel_partition=kernel_partition)
 
     logger.info(

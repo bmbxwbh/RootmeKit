@@ -125,15 +125,15 @@ def _cmd_parse_config(args: argparse.Namespace) -> int:
     errors: list[str] = []
 
     for i, device in enumerate(devices):
-        if "rom_url" not in device:
-            errors.append(f"Device #{i+1}: missing 'rom_url' field")
+        if "rom_url" not in device and "url" not in device:
+            errors.append(f"Device #{i+1}: missing 'url' or 'rom_url' field")
             continue
 
         dc = DeviceConfig.from_dict(device)
         validated.append({
             "name": dc.name,
             "display_name": dc.display_name,
-            "rom_url": dc.rom_url,
+            "url": dc.url,
             "has_manual_offsets": bool(dc.manual_offsets),
             "manual_offset_count": len(dc.manual_offsets),
         })
