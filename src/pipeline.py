@@ -7,6 +7,7 @@ offset calculation, codegen, and static site copy.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -114,6 +115,20 @@ class DeviceConfig:
         )
 
 
+def _cleanup(*paths: Path, label: str = "") -> None:
+    """Remove files/dirs to free disk space. Silently ignores errors."""
+    for p in paths:
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+                logger.info("[Cleanup] Removed dir: %s", p)
+            elif p.is_file():
+                p.unlink()
+                logger.info("[Cleanup] Removed file: %s", p)
+        except OSError:
+            pass
+
+
 def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult:
     """Run all stages for one device.
 
@@ -154,6 +169,12 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
 
         if not result.boot_img_path and not result.init_boot_img_path:
             raise RuntimeError("No boot image found after ROM unpack")
+
+        _cleanup(
+            device_work / "cache",
+            device_work / "unpacked",
+            label="Stage 1-2: ROM + partitions",
+        )
     except Exception as e:
         logger.error("[Stage 1-2] FAILED: %s", e)
         result.failed = True
@@ -172,6 +193,15 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
 
         if not result.vmlinux_path:
             raise RuntimeError("No vmlinux produced from kernel extraction")
+
+        cleanup_paths = []
+        if result.boot_img_path:
+            cleanup_paths.append(Path(result.boot_img_path))
+        if result.init_boot_img_path:
+            cleanup_paths.append(Path(result.init_boot_img_path))
+        for p in (device_work / "kernel_extracted").rglob("kernel"):
+            cleanup_paths.append(p)
+        _cleanup(*cleanup_paths, label="Stage 3: boot images + raw kernel")
     except Exception as e:
         logger.error("[Stage 3] FAILED: %s", e)
         result.failed = True
@@ -188,6 +218,9 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
         result.recovery_method = sym_result.get("recovery_method", "none")
         result.has_btf = sym_result.get("has_btf", False)
         result.btf_structs = sym_result.get("btf_structs", {})
+
+        vmlinux = device_work / "kernel_extracted" / "vmlinux"
+        _cleanup(vmlinux, label="Stage 4: vmlinux")
     except Exception as e:
         logger.error("[Stage 4] FAILED: %s", e)
         result.failed = True
