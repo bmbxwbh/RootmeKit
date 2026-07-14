@@ -34,7 +34,27 @@ def _run_cmd(
 
 def _tool_available(name: str) -> bool:
     """Check if an external tool is available on PATH."""
-    return shutil.which(name) is not None
+    path = shutil.which(name)
+    if path:
+        return True
+    # Also check common locations that may not be in PATH
+    for p in ["/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"]:
+        candidate = Path(p) / name
+        if candidate.exists() and candidate.is_file():
+            return True
+    return False
+
+
+def _tool_path(name: str) -> str | None:
+    """Find the full path of an external tool."""
+    path = shutil.which(name)
+    if path:
+        return path
+    for p in ["/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"]:
+        candidate = Path(p) / name
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
@@ -104,7 +124,8 @@ def _extract_payload_with_dumper_go(payload_bin: Path, output_dir: Path, partiti
     Returns:
         True if extraction succeeded.
     """
-    if not _tool_available("payload-dumper-go"):
+    dumper = _tool_path("payload-dumper-go")
+    if not dumper:
         logger.warning("payload-dumper-go not available, will use Python fallback")
         return False
 
@@ -112,7 +133,7 @@ def _extract_payload_with_dumper_go(payload_bin: Path, output_dir: Path, partiti
     part_arg = ",".join(partitions)
     try:
         proc = _run_cmd(
-            ["payload-dumper-go", "-o", str(output_dir), "-p", part_arg, str(payload_bin)],
+            [dumper, "-o", str(output_dir), "-p", part_arg, str(payload_bin)],
             timeout=3600,
         )
         if proc.returncode != 0:
@@ -233,7 +254,8 @@ def _unpack_bootimg_magiskboot(boot_img: Path, out_dir: Path) -> Path | None:
     Returns:
         Path to the extracted kernel file, or None if failed.
     """
-    if not _tool_available("magiskboot"):
+    magiskboot = _tool_path("magiskboot")
+    if not magiskboot:
         logger.warning("magiskboot not available, will use Python fallback")
         return None
 
@@ -243,7 +265,7 @@ def _unpack_bootimg_magiskboot(boot_img: Path, out_dir: Path) -> Path | None:
 
     try:
         proc = _run_cmd(
-            ["magiskboot", "unpack", "-n", "-h", str(boot_img)],
+            [magiskboot, "unpack", "-n", "-h", str(boot_img)],
             cwd=work_dir,
             timeout=120,
         )
@@ -277,7 +299,7 @@ def _unpack_bootimg_python(boot_img: Path, out_dir: Path) -> Path | None:
     Returns:
         Path to the extracted kernel file, or None if failed.
     """
-    from ..utils.bootimg_utils import unpack_boot_image
+    from ..utils.bootimg_utils import unpack_bootimg as unpack_boot_image
 
     try:
         return unpack_boot_image(boot_img, out_dir)
