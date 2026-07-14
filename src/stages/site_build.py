@@ -36,5 +36,21 @@ def run(all_device_results: dict[str, dict[str, Any]], work_dir: str | Path) -> 
                 shutil.copy2(item, site_dir / item.name)
                 logger.debug("Copied %s -> %s", item, site_dir / item.name)
 
+    # Ensure index.html exists (GitHub Pages root needs it)
+    if not (site_dir / "index.html").exists():
+        # If only exploit.html exists, copy it as index.html
+        exploit_html = site_dir / "exploit.html"
+        if exploit_html.exists():
+            shutil.copy2(exploit_html, site_dir / "index.html")
+            logger.info("Copied exploit.html -> index.html")
+        else:
+            # Create a minimal index.html
+            (site_dir / "index.html").write_text(
+                "<!DOCTYPE html><html><head>"
+                "<meta http-equiv='refresh' content='0;url=exploit.html'>"
+                "</head><body></body></html>"
+            )
+            logger.info("Created redirect index.html")
+
     logger.info("Site build complete: %s", site_dir)
     return {"site_dir": site_dir}

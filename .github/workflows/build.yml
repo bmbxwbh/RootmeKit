@@ -131,7 +131,7 @@ jobs:
         if: steps.check.outputs.build_success == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: output/site/
+          path: work/site/
 
       - name: Create GitHub Release
         if: steps.check.outputs.build_success == 'true'
