@@ -5,11 +5,10 @@
 devices:
   # 示例设备 - 替换为您自己的 ROM 下载链接
   - rom_url: "https://ultimateota.d.miui.com/OS3.0.303.0.WMLCNXM/corot-ota_full-OS3.0.303.0.WMLCNXM-user-16.0-f025b69444.zip?t=1784004083&s=7009c8d15405be4f58c29aa36279623c"
-    # kernel_partition: 内核所在分区
+    # kernel_partition: 内核所在分区 (留空自动检测)
     #   老手机 (Android 12 及更早): boot
     #   新手机 (Android 13+ GKI):     init_boot
     #   不填则自动尝试 init_boot -> boot -> vendor_boot
-    kernel_partition: "boot"
     # name: 可选，默认从 ROM 文件名自动生成
     # manual_offsets: 可选，自动提取失败时手动指定
     #   KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
