@@ -3,7 +3,7 @@
 #   ROM 链接 (.zip) — 完整流程: 下载 ROM → 解包分区 → 提取内核
 #   Boot 镜像 (.img) — 精简流程: 下载镜像 → 提取内核
 # 自动识别: 下载后根据实际文件后缀判断，无需手动指定
-# 修改此文件后推送到 main 分支，GitHub Action 自动构建
+# 修改此文件后推送到 main 分支，GitHub Action 自动构建.
 
 devices:
   # ROM 示例 - 填写完整 ROM 下载链接
