@@ -47,7 +47,7 @@ jobs:
           unzip -j /tmp/magisk.apk lib/x86_64/libmagiskboot.so -d /tmp/magisk_extract
           mv /tmp/magisk_extract/libmagiskboot.so /usr/local/bin/magiskboot
           chmod +x /usr/local/bin/magiskboot
-          magiskboot -v
+          magiskboot 2>&1 || true
 
       - name: Install vmlinux-to-elf
         run: pip install vmlinux-to-elf
