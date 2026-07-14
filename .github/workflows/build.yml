@@ -39,7 +39,7 @@ jobs:
 
       - name: Install payload-dumper-go
         run: |
-          curl -sL https://github.com/ssut/payload-dumper-go/releases/download/v1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz | tar xz -C /usr/local/bin payload-dumper-go
+          curl -sL https://github.com/ssut/payload-dumper-go/releases/download/1.3.0/payload-dumper-go_1.3.0_linux_amd64.tar.gz | tar xz -C /usr/local/bin payload-dumper-go
 
       - name: Install magiskboot
         run: |
