@@ -3,8 +3,6 @@ name: Build RootmeKit
 on:
   push:
     branches: [main]
-    paths:
-      - config/devices.yaml
   workflow_dispatch:
 
 permissions:
