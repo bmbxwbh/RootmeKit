@@ -4,7 +4,7 @@
 
 devices:
   # 示例设备 - 替换为您自己的 ROM 下载链接
-  - rom_url: "https://ultimateota.d.miui.com/OS3.0.303.0.WMLCNXM/corot-ota_full-OS3.0.303.0.WMLCNXM-user-16.0-f025b69444.zip?t=1784004083&s=7009c8d15405be4f58c29aa36279623c"
+  - rom_url: "https://gauss-compota-c-cn.allawnfs.com/remove-24b572ce99b11baa0fd437dddf96fc64/g-10eab6008d5642cf42abd2aa41f847cb/component-ota/26/04/13/2abf9491f2104f5f851aa093596f7c20.zip?sign=bb3aecf226f4e95a02b6dd13840002e2&t=6a55ed4f&AWSAccessKeyId=ayjy7KyLVHvDqDax6_KqJgtBeORTJARg9MSGiL66&Expires=1784018007&Signature=xXUTx3mgEPZHo1wcLdT%2BhXfxxE4%3D"
     # kernel_partition: 内核所在分区
     #   老手机 (Android 12 及更早): boot
     #   新手机 (Android 13+ GKI):     init_boot
