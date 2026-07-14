@@ -116,11 +116,6 @@ def _decode_field(buf: bytes, offset: int) -> tuple[int, int, object, int]:
     elif wire_type == 4:
         # End group — should not appear at top level
         value = None
-    elif wire_type == 5:
-        if offset + 4 > len(buf):
-            raise ValueError(f"32-bit field {field_number} extends beyond buffer")
-        value = buf[offset:offset + 4]
-        offset += 4
     else:
         raise ValueError(f"Unknown wire type {wire_type} at field {field_number}")
 
@@ -299,25 +294,36 @@ def extract_payload_partitions(
     if magic_peek.startswith(PAYLOAD_MAGIC_CRAU):
         # Modern CrAU format
         logger.info("Detected CrAU (modern) payload format")
-        # CrAU header:
-        #   [4 bytes] "CrAU"
-        #   [8 bytes] format_version (big-endian uint64)
-        #   [8 bytes] manifest_size (big-endian uint64)
-        #   [32 bytes] metadata_signature_hash (only if version >= 2)
-        #   [manifest_size bytes] DeltaArchiveManifest
-        # We already read 20 bytes; version and manifest_size are at offset 4 and 12
+        # CrAU header per AOSP update_engine:
+        #   [4 bytes]  magic = "CrAU"
+        #   [8 bytes]  format_version (big-endian uint64)
+        #   [8 bytes]  manifest_size (big-endian uint64)
+        #   If version >= 2:
+        #     [4 bytes]  metadata_signature_size (big-endian uint32)
+        #   [manifest_size bytes] DeltaArchiveManifest (protobuf)
+        #   [metadata_signature_size bytes] metadata_signature
+        #   [remaining bytes] data blobs
         format_version = struct.unpack(">Q", magic_peek[4:12])[0]
         manifest_size = struct.unpack(">Q", magic_peek[12:20])[0]
         logger.info("CrAU format version: %d, manifest size: %d", format_version, manifest_size)
 
-        metadata_sig_size = 32 if format_version >= 2 else 0
-        # After 20-byte header + signature comes the manifest
-        manifest_offset = 20 + metadata_sig_size
+        header_size = 20  # magic(4) + version(8) + manifest_size(8)
+        metadata_sig_size = 0
+        if format_version >= 2:
+            # Next 4 bytes after the 20-byte header = metadata_signature_size
+            with open(payload_path, "rb") as f:
+                f.seek(20)
+                metadata_sig_size = struct.unpack(">I", f.read(4))[0]
+            header_size += 4
+            logger.info("Metadata signature size: %d", metadata_sig_size)
+
+        manifest_offset = header_size
 
         with open(payload_path, "rb") as f:
             f.seek(manifest_offset)
             manifest_data = f.read(manifest_size)
-            data_blob_start = f.tell()
+            # Data blobs start after manifest + metadata signature
+            data_blob_start = manifest_offset + manifest_size + metadata_sig_size
 
     elif magic_peek.startswith(PAYLOAD_MAGIC_BRILLO):
         # Legacy BrilloUpdatePayload format
