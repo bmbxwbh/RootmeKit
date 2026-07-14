@@ -82,8 +82,15 @@ def download_rom(rom_url: str, cache_dir: str | Path) -> Path:
     return local_path
 
 
-def _unpack_payload(rom_path: Path, output_dir: Path) -> Path:
+def _unpack_payload(rom_path: Path, output_dir: Path, kernel_partition: str | None = None) -> Path:
     """Unpack payload.bin using Python-native payload parser.
+
+    Args:
+        rom_path: Path to the ROM file.
+        output_dir: Directory for extraction output.
+        kernel_partition: Which partition contains the kernel.
+            "init_boot" for Android 13+ GKI, "boot" for older devices.
+            None means auto-detect (try init_boot -> boot -> vendor_boot).
 
     Returns:
         Path to the directory containing extracted images.
@@ -113,11 +120,19 @@ def _unpack_payload(rom_path: Path, output_dir: Path) -> Path:
     if payload_bin is None or not payload_bin.exists():
         raise FileNotFoundError("payload.bin not found in ROM")
 
-    logger.info("Extracting payload using Python-native parser: %s", payload_bin)
+    # Determine which partitions to extract
+    if kernel_partition:
+        # User specified the kernel partition explicitly
+        partition_names = [kernel_partition]
+    else:
+        # Auto-detect: try init_boot first (GKI), then boot, then vendor_boot
+        partition_names = ["init_boot", "boot", "vendor_boot"]
+
+    logger.info("Extracting payload using Python-native parser: %s (partitions: %s)", payload_bin, partition_names)
     extract_payload_partitions(
         str(payload_bin),
         str(payload_dir),
-        partition_names=["init_boot", "boot"],
+        partition_names=partition_names,
     )
 
     return payload_dir
@@ -182,12 +197,15 @@ def _unpack_pac(rom_path: Path, output_dir: Path) -> Path:
     return pac_dir
 
 
-def unpack_rom(rom_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
+def unpack_rom(rom_path: str | Path, output_dir: str | Path, kernel_partition: str | None = None) -> dict[str, Any]:
     """Unpack ROM based on detected type.
 
     Args:
         rom_path: Path to the ROM file or directory.
         output_dir: Directory to extract into.
+        kernel_partition: Which partition contains the kernel.
+            "init_boot" for Android 13+ GKI, "boot" for older devices.
+            None means auto-detect.
 
     Returns:
         dict with keys: 'rom_type', 'unpack_dir', 'boot_img_path', 'init_boot_img_path'
@@ -207,7 +225,7 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
     }
 
     if rom_type == "payload":
-        unpack_dir = _unpack_payload(rom, out_dir)
+        unpack_dir = _unpack_payload(rom, out_dir, kernel_partition=kernel_partition)
         result["unpack_dir"] = unpack_dir
     elif rom_type == "ozip":
         unpack_dir = _unpack_ozip(rom, out_dir)
@@ -228,7 +246,7 @@ def unpack_rom(rom_path: str | Path, output_dir: str | Path) -> dict[str, Any]:
         # Last resort: try as a zip file
         if rom.suffix.lower() == ".zip":
             try:
-                unpack_dir = _unpack_payload(rom, out_dir)
+                unpack_dir = _unpack_payload(rom, out_dir, kernel_partition=kernel_partition)
                 result["unpack_dir"] = unpack_dir
                 result["rom_type"] = "payload"
             except Exception as e:
@@ -251,6 +269,8 @@ def run(device_config: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
 
     Args:
         device_config: Device configuration dict with 'rom_url' key.
+            Optional 'kernel_partition' key specifies which partition
+            contains the kernel ("boot" or "init_boot").
         work_dir: Working directory for downloads and extraction.
 
     Returns:
@@ -264,11 +284,13 @@ def run(device_config: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     if not rom_url:
         raise ValueError("device_config must contain 'rom_url'")
 
+    kernel_partition = device_config.get("kernel_partition")
+
     # Stage 1: Download
     rom_path = download_rom(rom_url, cache_dir)
 
     # Stage 2: Unpack
-    result = unpack_rom(rom_path, unpack_dir)
+    result = unpack_rom(rom_path, unpack_dir, kernel_partition=kernel_partition)
 
     logger.info(
         "ROM unpack complete: type=%s, boot=%s, init_boot=%s",

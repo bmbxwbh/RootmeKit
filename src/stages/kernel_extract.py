@@ -158,6 +158,9 @@ def run(prev_result: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
     boot_img_path = prev_result.get("boot_img_path")
     init_boot_img_path = prev_result.get("init_boot_img_path")
 
+    # Determine primary kernel image: prefer init_boot (GKI), fallback to boot
+    primary_img_path = init_boot_img_path or boot_img_path
+
     result: dict[str, Any] = {
         "vmlinux_path": None,
         "kernel_version": None,
@@ -165,12 +168,12 @@ def run(prev_result: dict[str, Any], work_dir: str | Path) -> dict[str, Any]:
         "arch": "aarch64",
     }
 
-    if not boot_img_path:
+    if not primary_img_path:
         logger.error("No boot image path provided from previous stage")
         return result
 
     # Step 1: Extract raw kernel from boot image
-    kernel_image = extract_kernel(boot_img_path, extract_dir)
+    kernel_image = extract_kernel(primary_img_path, extract_dir)
     if kernel_image is None:
         logger.error("Failed to extract kernel from boot image")
         return result

@@ -60,11 +60,16 @@ class DeviceConfig:
 
     Only rom_url is required. name is auto-generated
     from the ROM filename if not provided.
+    kernel_partition specifies which partition contains the kernel:
+      - "init_boot" for Android 13+ GKI devices
+      - "boot" for older devices (Android 12 and earlier)
+      - None/empty means auto-detect (try init_boot -> boot -> vendor_boot)
     """
 
     name: str
     display_name: str
     rom_url: str
+    kernel_partition: str | None = None
     manual_offsets: dict[str, int] = field(default_factory=dict)
 
     @classmethod
@@ -98,10 +103,13 @@ class DeviceConfig:
                 elif isinstance(v, int):
                     manual_offsets[k] = v
 
+        kernel_partition = data.get("kernel_partition") or None
+
         return cls(
             name=name,
             display_name=display_name,
             rom_url=rom_url,
+            kernel_partition=kernel_partition,
             manual_offsets=manual_offsets,
         )
 
@@ -137,13 +145,14 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
         logger.info("[Stage 1-2] Downloading and unpacking ROM...")
         device_dict = {
             "rom_url": device_config.rom_url,
+            "kernel_partition": device_config.kernel_partition,
         }
         unpack_result = rom_unpack_run(device_dict, device_work)
         result.rom_type = unpack_result.get("rom_type", "unknown")
         result.boot_img_path = str(unpack_result["boot_img_path"]) if unpack_result.get("boot_img_path") else None
         result.init_boot_img_path = str(unpack_result["init_boot_img_path"]) if unpack_result.get("init_boot_img_path") else None
 
-        if not result.boot_img_path:
+        if not result.boot_img_path and not result.init_boot_img_path:
             raise RuntimeError("No boot image found after ROM unpack")
     except Exception as e:
         logger.error("[Stage 1-2] FAILED: %s", e)

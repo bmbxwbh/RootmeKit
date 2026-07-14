@@ -146,25 +146,19 @@ def _parse_message(buf: bytes) -> list[tuple[int, int, object]]:
 def _parse_partition_update(data: bytes) -> dict:
     """Parse a PartitionUpdate protobuf message.
 
-    Per AOSP update_metadata.proto:
+    Per AOSP update_metadata.proto (major version 2+):
       field 1: partition_name (string, length-delimited)
       field 2: run_postinstall (bool, varint)
       field 3: postinstall_path (string)
       field 4: filesystem_type (string)
-      field 5: new_partition_info (message: PartitionInfo)
-        - field 1: size (varint)
-        - field 2: hash (bytes)
+      field 5: new_partition_signature (repeated Signatures.Signature)
       field 6: old_partition_info (message: PartitionInfo)
-      field 7: operations (repeated InstallOperation, length-delimited)
-      field 8: postinstall_optional (bool)
-      field 9: hash_tree_extent (Extent)
-      field 10: hash_tree_data (bytes)
-      field 11: hash_tree_algorithm (string)
-      field 12: hash_tree_salt (bytes)
-      field 13: fec_extent (Extent)
-      field 14: fec_data (bytes)
-      field 15: fec_roots (varint)
-      field 16: version (string)
+      field 7: new_partition_info (message: PartitionInfo)
+      field 8: operations (repeated InstallOperation, length-delimited)
+      field 9: postinstall_optional (bool)
+      field 10-16: hash_tree/fec fields
+      field 17: version (string)
+      field 18: merge_operations (repeated CowMergeOperation)
     """
     info: dict = {
         "partition_name": "",
@@ -179,15 +173,16 @@ def _parse_partition_update(data: bytes) -> dict:
             break
         if fn == 1 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             info["partition_name"] = val.decode("utf-8", errors="replace")
-        elif fn == 5 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
-            # PartitionInfo sub-message
+        elif fn == 7 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            # PartitionInfo sub-message (field 7 = new_partition_info)
             try:
                 for sfn, _swt, sval in _parse_message(val):
                     if sfn == 1:
                         info["new_partition_size"] = sval
             except (ValueError, IndexError):
                 pass
-        elif fn == 7 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+        elif fn == 8 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+            # InstallOperation (field 8 = operations)
             try:
                 op = _parse_install_operation(val)
                 info["operations"].append(op)
@@ -199,11 +194,16 @@ def _parse_partition_update(data: bytes) -> dict:
 def _parse_install_operation(data: bytes) -> dict:
     """Parse an InstallOperation protobuf message.
 
-    Fields we care about:
+    Per AOSP update_metadata.proto:
       field 1: type (varint) — 0=REPLACE, 1=REPLACE_BZ, 2=REPLACE_XZ, …
       field 2: data_offset (varint) — offset into the data blob section
       field 3: data_length (varint) — length of data blob
-      field 4: dst_extents (repeated message)
+      field 4: src_extents (repeated Extent)
+      field 5: src_length (varint)
+      field 6: dst_extents (repeated Extent)
+      field 7: dst_length (varint)
+      field 8: data_sha256_hash (bytes)
+      field 9: src_sha256_hash (bytes)
     """
     op: dict = {
         "type": 0,
@@ -223,7 +223,7 @@ def _parse_install_operation(data: bytes) -> dict:
             op["data_offset"] = val
         elif fn == 3 and wt == _WIRE_VARINT:
             op["data_length"] = val
-        elif fn == 4 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+        elif fn == 6 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
             try:
                 extent = _parse_extent(val)
                 op["dst_extents"].append(extent)
@@ -361,70 +361,40 @@ def extract_payload_partitions(
         )
 
     # Parse the manifest to find partitions
-    # Per AOSP update_metadata.proto:
-    #   field 1: block_size (varint)
-    #   field 2: manifest_flags (varint)
-    #   field 3: minor_version (varint)
-    #   field 4: partitions (repeated PartitionUpdate, length-delimited)
-    #   field 5: max_timestamp (varint)
-    #   field 6: dynamic_partition_metadata (message)
+    # Per AOSP update_metadata.proto (major version 2+):
+    #   field 3: block_size (varint)
+    #   field 4: signatures_offset (varint)
+    #   field 5: signatures_size (varint)
+    #   field 12: minor_version (varint)
+    #   field 13: partitions (repeated PartitionUpdate, length-delimited)
+    #   field 14: max_timestamp (varint)
+    #   field 15: dynamic_partition_metadata (message)
+    #   field 17: apex_info (repeated message)
     partitions: list[dict] = []
     offset = 0
 
-    # Debug: dump all top-level fields in the manifest
-    logger.info("Manifest size: %d bytes, dumping top-level fields...", len(manifest_data))
     while offset < len(manifest_data):
         try:
             fn, wt, val, offset = _decode_field(manifest_data, offset)
         except (ValueError, IndexError):
             break
-        # Log every field we encounter (truncate bytes values)
-        if wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
-            vrepr = f"<{len(val)} bytes>"
-        elif wt == _WIRE_VARINT:
-            vrepr = str(val)
-        else:
-            vrepr = f"<wt={wt}>"
-        logger.info("  manifest field %d (wt=%d): %s", fn, wt, vrepr)
 
-        # Xiaomi HyperOS / modern AOSP uses field 13 for partitions
-        # Older AOSP uses field 4 — try both
+        if fn == 3 and wt == _WIRE_VARINT:
+            logger.info("  block_size: %d", val)
+        elif fn == 12 and wt == _WIRE_VARINT:
+            logger.info("  minor_version: %d", val)
+
+        # AOSP update_metadata.proto (major version 2+):
+        # field 3: block_size, field 4: signatures_offset, field 5: signatures_size
+        # field 13: partitions (repeated PartitionUpdate)
         is_partition = (
-            (fn in (4, 13)) and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes)
+            (fn == 13) and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes)
         )
         if is_partition:
             try:
                 pu = _parse_partition_update(val)
                 if pu["partition_name"]:
                     partitions.append(pu)
-                    logger.debug("  -> partition: %s (size=%d, ops=%d)",
-                                 pu["partition_name"], pu["new_partition_size"],
-                                 len(pu["operations"]))
-                else:
-                    # Dump sub-fields of this message to debug field numbers
-                    if len(partitions) == 0:
-                        logger.info("  -> field %d sub-fields (first candidate):", fn)
-                        sub_offset = 0
-                        while sub_offset < len(val):
-                            try:
-                                sfn, swt, sval, sub_offset = _decode_field(val, sub_offset)
-                            except (ValueError, IndexError):
-                                break
-                            if swt == _WIRE_LENGTH_DELIMITED and isinstance(sval, bytes):
-                                # Try to decode as UTF-8 for string fields
-                                try:
-                                    decoded = sval.decode("utf-8")
-                                    if all(32 <= ord(c) < 127 for c in decoded):
-                                        srepr = f'"{decoded}"'
-                                    else:
-                                        srepr = f"<{len(sval)} bytes>"
-                                except:
-                                    srepr = f"<{len(sval)} bytes>"
-                            elif swt == _WIRE_VARINT:
-                                srepr = str(sval)
-                            else:
-                                srepr = f"<wt={swt}>"
-                            logger.info("    sub-field %d (wt=%d): %s", sfn, swt, srepr)
             except (ValueError, IndexError):
                 pass
 
