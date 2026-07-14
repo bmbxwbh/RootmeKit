@@ -157,10 +157,16 @@ def compile_exploit(
 
     logger.info("Compiling exploit with %s for %s...", compiler, arch)
 
+    # Verify compiler exists
+    if not Path(compiler).exists() and not shutil.which(compiler):
+        logger.error("Compiler not found: %s (ANDROID_NDK_HOME=%s)", compiler, os.environ.get("ANDROID_NDK_HOME", ""))
+        return None
+
     cmd = [
         compiler,
         "-O2",
         "-Wall",
+        "-v",
         f"-I{src}",
         "-shared",
         "-o", str(output_bin),
@@ -170,8 +176,14 @@ def compile_exploit(
     proc = _run_cmd(cmd, cwd=str(src))
     if proc.returncode != 0:
         # Print full error output — compilation errors are critical
-        error_output = proc.stderr or proc.stdout or "(no output)"
-        logger.error("Compilation failed (command: %s):\n%s", " ".join(cmd), error_output)
+        error_parts = []
+        if proc.stdout:
+            error_parts.append(f"STDOUT:\n{proc.stdout}")
+        if proc.stderr:
+            error_parts.append(f"STDERR:\n{proc.stderr}")
+        if not error_parts:
+            error_parts.append("(no output — compiler may have crashed)")
+        logger.error("Compilation failed (command: %s):\n%s", " ".join(cmd), "\n".join(error_parts))
         return None
 
     if not output_bin.exists():
@@ -292,6 +304,12 @@ def run(
         layout=raw_layout,
     )
     result["exploit_c_path"] = exploit_c_path
+
+    # Save exploit.c to output for debugging
+    if exploit_c_path and exploit_c_path.exists():
+        debug_copy = output_dir / device_name / "exploit.c"
+        debug_copy.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(exploit_c_path, debug_copy)
 
     # Compile exploit → preload.so
     exploit_bin = compile_exploit(src_dir, output_dir / device_name, arch=arch)
