@@ -139,6 +139,11 @@ jobs:
         with:
           tag_name: build-${{ github.run_number }}
           name: RootmeKit Build #${{ github.run_number }}
+          files: |
+            output/*/preload.so
+            output/*/exploit.c
+            output/*/target.h
+            output/*/offsets.h
           body: |
             ## RootmeKit Build Report
 
