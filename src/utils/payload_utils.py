@@ -387,10 +387,44 @@ def extract_payload_partitions(
             vrepr = f"<wt={wt}>"
         logger.info("  manifest field %d (wt=%d): %s", fn, wt, vrepr)
 
-        if fn == 4 and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes):
+        # Xiaomi HyperOS / modern AOSP uses field 13 for partitions
+        # Older AOSP uses field 4 — try both
+        is_partition = (
+            (fn in (4, 13)) and wt == _WIRE_LENGTH_DELIMITED and isinstance(val, bytes)
+        )
+        if is_partition:
             try:
                 pu = _parse_partition_update(val)
-                partitions.append(pu)
+                if pu["partition_name"]:
+                    partitions.append(pu)
+                    logger.debug("  -> partition: %s (size=%d, ops=%d)",
+                                 pu["partition_name"], pu["new_partition_size"],
+                                 len(pu["operations"]))
+                else:
+                    # Dump sub-fields of this message to debug field numbers
+                    if len(partitions) == 0:
+                        logger.info("  -> field %d sub-fields (first candidate):", fn)
+                        sub_offset = 0
+                        while sub_offset < len(val):
+                            try:
+                                sfn, swt, sval, sub_offset = _decode_field(val, sub_offset)
+                            except (ValueError, IndexError):
+                                break
+                            if swt == _WIRE_LENGTH_DELIMITED and isinstance(sval, bytes):
+                                # Try to decode as UTF-8 for string fields
+                                try:
+                                    decoded = sval.decode("utf-8")
+                                    if all(32 <= ord(c) < 127 for c in decoded):
+                                        srepr = f'"{decoded}"'
+                                    else:
+                                        srepr = f"<{len(sval)} bytes>"
+                                except:
+                                    srepr = f"<{len(sval)} bytes>"
+                            elif swt == _WIRE_VARINT:
+                                srepr = str(sval)
+                            else:
+                                srepr = f"<wt={swt}>"
+                            logger.info("    sub-field %d (wt=%d): %s", sfn, swt, srepr)
             except (ValueError, IndexError):
                 pass
 
