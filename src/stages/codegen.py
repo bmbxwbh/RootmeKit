@@ -58,6 +58,8 @@ def generate_exploit_c(
     kernel_version: str | None = None,
     kernel_is_gki: bool = False,
     arch: str = "aarch64",
+    template_offsets: dict[str, Any] | None = None,
+    layout: dict[str, Any] | None = None,
 ) -> Path:
     """Render exploit.c from the universal exploit.c.j2 template.
 
@@ -87,66 +89,8 @@ def generate_exploit_c(
 
     # Build template-friendly offsets dict
     # Templates use keys like SELINUX_ENFORCING_OFF, offset_calc uses SELINUX_ENFORCING
-    raw_offsets = prev_result.get("offsets", {})
-    raw_layout = prev_result.get("layout", {})
-    template_offsets: dict[str, Any] = {}
-
-    # Map symbol names to _OFF/_SYM_OFF format expected by exploit.c.j2
-    suffix_map = {
-        "INIT_TASK": "INIT_TASK_OFF",
-        "INIT_CRED": "INIT_CRED_OFF",
-        "SELINUX_ENFORCING": "SELINUX_ENFORCING_OFF",
-        "SELINUX_STATE": "SELINUX_STATE_OFF",
-        "ANON_PIPE_BUF_OPS": "ANON_PIPE_BUF_OPS_SYM_OFF",
-        "KMALLOC_CACHES": "KMALLOC_CACHES_OFF",
-        "NFULNL_LOGGER": "SLIDE_NFULNL_LOGGER_OFF",
-        "SECURITY_HOOK_HEADS": "SECURITY_HOOK_HEADS_OFF",
-        "DMA_HEAP_FOPS": "DMA_HEAP_FOPS_OFF",
-        "ASHMEM_FOPS": "ASHMEM_FOPS_OFF",
-        "KIMAGE_TEXT_BASE": "KIMAGE_TEXT_BASE",
-    }
-    for src_key, dst_key in suffix_map.items():
-        if src_key in raw_offsets:
-            template_offsets[dst_key] = raw_offsets[src_key]
-
-    # Add struct offsets with _OFF suffix
-    struct_offsets = prev_result.get("struct_offsets", {})
-    struct_field_map = {
-        ("task_struct", "cred"): "TASK_CRED_OFF",
-        ("task_struct", "real_cred"): "TASK_REAL_CRED_OFF",
-        ("task_struct", "pid"): "TASK_PID_OFF",
-        ("task_struct", "tasks"): "TASK_TASKS_OFF",
-        ("task_struct", "seccomp"): "TASK_SECCOMP_OFF",
-        ("cred", "uid"): "CRED_UID_OFF",
-        ("cred", "gid"): "CRED_GID_OFF",
-        ("cred", "cap_effective"): "CRED_CAP_EFF_OFF",
-        ("cred", "cap_inheritable"): "CRED_CAP_INH_OFF",
-        ("cred", "cap_permitted"): "CRED_CAP_PERM_OFF",
-        ("cred", "cap_bset"): "CRED_CAP_BSET_OFF",
-        ("cred", "security"): "CRED_SECURITY_OFF",
-        ("pipe_buffer", "page"): "PIPE_BUF_PAGE_OFF",
-        ("pipe_buffer", "ops"): "PIPE_BUF_OPS_OFF",
-        ("pipe_buffer", "flags"): "PIPE_BUF_FLAGS_OFF",
-        ("pipe_buffer", "private"): "PIPE_BUF_PRIVATE_OFF",
-        ("mm_struct", "start_code"): "MM_START_CODE_OFF",
-        ("mm_struct", "end_code"): "MM_END_CODE_OFF",
-        ("mm_struct", "start_data"): "MM_START_DATA_OFF",
-        ("mm_struct", "end_data"): "MM_END_DATA_OFF",
-        ("mm_struct", "start_brk"): "MM_START_BRK_OFF",
-        ("mm_struct", "brk"): "MM_BRK_OFF",
-        ("mm_struct", "start_stack"): "MM_START_STACK_OFF",
-    }
-    for (struct_name, field_name), dst_key in struct_field_map.items():
-        struct = struct_offsets.get(struct_name, {})
-        if field_name in struct:
-            template_offsets[dst_key] = struct[field_name]
-
-    # Layout constants
-    for key in ("KIMAGE_TEXT_BASE", "PAGE_OFFSET", "VMEMMAP_START", "MODULES_VADDR", "VA_BITS"):
-        if key in raw_layout:
-            template_offsets[key] = raw_layout[key]
-
-    logger.info("Template offsets: %d entries mapped", len(template_offsets))
+    t_offsets = template_offsets or {}
+    t_layout = layout or {}
 
     # Render exploit.c from template
     env = _get_template_env()
@@ -158,8 +102,8 @@ def generate_exploit_c(
         kernel_major=kernel_major,
         kernel_minor=kernel_minor,
         arch=arch,
-        offsets=template_offsets,
-        layout=raw_layout,
+        offsets=t_offsets,
+        layout=t_layout,
     )
 
     exploit_c_path = out_dir / "exploit.c"
@@ -263,6 +207,66 @@ def run(
         logger.error("Missing target.h or offsets.h from previous stage")
         return result
 
+    # Build template-friendly offsets dict
+    # Templates use keys like SELINUX_ENFORCING_OFF, offset_calc uses SELINUX_ENFORCING
+    raw_offsets = prev_result.get("offsets", {})
+    raw_layout = prev_result.get("layout", {})
+    template_offsets: dict[str, Any] = {}
+
+    suffix_map = {
+        "INIT_TASK": "INIT_TASK_OFF",
+        "INIT_CRED": "INIT_CRED_OFF",
+        "SELINUX_ENFORCING": "SELINUX_ENFORCING_OFF",
+        "SELINUX_STATE": "SELINUX_STATE_OFF",
+        "ANON_PIPE_BUF_OPS": "ANON_PIPE_BUF_OPS_SYM_OFF",
+        "KMALLOC_CACHES": "KMALLOC_CACHES_OFF",
+        "NFULNL_LOGGER": "SLIDE_NFULNL_LOGGER_OFF",
+        "SECURITY_HOOK_HEADS": "SECURITY_HOOK_HEADS_OFF",
+        "DMA_HEAP_FOPS": "DMA_HEAP_FOPS_OFF",
+        "ASHMEM_FOPS": "ASHMEM_FOPS_OFF",
+        "KIMAGE_TEXT_BASE": "KIMAGE_TEXT_BASE",
+    }
+    for src_key, dst_key in suffix_map.items():
+        if src_key in raw_offsets:
+            template_offsets[dst_key] = raw_offsets[src_key]
+
+    struct_offsets = prev_result.get("struct_offsets", {})
+    struct_field_map = {
+        ("task_struct", "cred"): "TASK_CRED_OFF",
+        ("task_struct", "real_cred"): "TASK_REAL_CRED_OFF",
+        ("task_struct", "pid"): "TASK_PID_OFF",
+        ("task_struct", "tasks"): "TASK_TASKS_OFF",
+        ("task_struct", "seccomp"): "TASK_SECCOMP_OFF",
+        ("cred", "uid"): "CRED_UID_OFF",
+        ("cred", "gid"): "CRED_GID_OFF",
+        ("cred", "cap_effective"): "CRED_CAP_EFF_OFF",
+        ("cred", "cap_inheritable"): "CRED_CAP_INH_OFF",
+        ("cred", "cap_permitted"): "CRED_CAP_PERM_OFF",
+        ("cred", "cap_bset"): "CRED_CAP_BSET_OFF",
+        ("cred", "security"): "CRED_SECURITY_OFF",
+        ("pipe_buffer", "page"): "PIPE_BUF_PAGE_OFF",
+        ("pipe_buffer", "ops"): "PIPE_BUF_OPS_OFF",
+        ("pipe_buffer", "flags"): "PIPE_BUF_FLAGS_OFF",
+        ("pipe_buffer", "private"): "PIPE_BUF_PRIVATE_OFF",
+        ("mm_struct", "start_code"): "MM_START_CODE_OFF",
+        ("mm_struct", "end_code"): "MM_END_CODE_OFF",
+        ("mm_struct", "start_data"): "MM_START_DATA_OFF",
+        ("mm_struct", "end_data"): "MM_END_DATA_OFF",
+        ("mm_struct", "start_brk"): "MM_START_BRK_OFF",
+        ("mm_struct", "brk"): "MM_BRK_OFF",
+        ("mm_struct", "start_stack"): "MM_START_STACK_OFF",
+    }
+    for (struct_name, field_name), dst_key in struct_field_map.items():
+        struct = struct_offsets.get(struct_name, {})
+        if field_name in struct:
+            template_offsets[dst_key] = struct[field_name]
+
+    for key in ("KIMAGE_TEXT_BASE", "PAGE_OFFSET", "VMEMMAP_START", "MODULES_VADDR", "VA_BITS"):
+        if key in raw_layout:
+            template_offsets[key] = raw_layout[key]
+
+    logger.info("Template offsets: %d entries mapped", len(template_offsets))
+
     # Generate exploit.c
     exploit_c_path = generate_exploit_c(
         target_h_path=target_h_path,
@@ -273,6 +277,8 @@ def run(
         kernel_version=kernel_version,
         kernel_is_gki=prev_result.get("kernel_is_gki", False),
         arch=arch,
+        template_offsets=template_offsets,
+        layout=raw_layout,
     )
     result["exploit_c_path"] = exploit_c_path
 
