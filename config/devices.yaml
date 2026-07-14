@@ -9,7 +9,7 @@ devices:
     #   老手机 (Android 12 及更早): boot
     #   新手机 (Android 13+ GKI):     init_boot
     #   不填则自动尝试 init_boot -> boot -> vendor_boot
-    kernel_partition: "boot"
+    kernel_partition: "init_boot"
     # name: 可选，默认从 ROM 文件名自动生成
     # manual_offsets: 可选，自动提取失败时手动指定
     #   KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
