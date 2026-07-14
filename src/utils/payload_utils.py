@@ -424,6 +424,13 @@ def extract_payload_partitions(
         total_size = part["new_partition_size"]
         logger.info("Partition %s: size=%d, operations=%d", name, total_size, len(part["operations"]))
 
+        # Dump operation type distribution for debugging
+        op_type_counts: dict[int, int] = {}
+        for op in part["operations"]:
+            t = op["type"]
+            op_type_counts[t] = op_type_counts.get(t, 0) + 1
+        logger.info("Partition %s op types: %s", name, op_type_counts)
+
         # Collect all (data_offset, data_length, dst_offset, dst_length, op_type) tuples
         ops_to_write: list[tuple[int, int, int, int, int]] = []
         for op in part["operations"]:
@@ -526,13 +533,27 @@ def extract_payload_partitions(
                     elif op_type == 2:  # REPLACE_XZ (xz/lzma)
                         import lzma
                         blob = lzma.decompress(blob)
-                    elif op_type == 8:  # BROTLI
+                    elif op_type == 8:  # BROTLI or LZ4 (some OEMs use this for LZ4)
+                        # Try BROTLI first
                         try:
                             import brotli
                             blob = brotli.decompress(blob)
                         except ImportError:
-                            logger.error("BROTLI decompression requires brotli package")
-                            continue
+                            pass
+                        except Exception as brotli_err:
+                            logger.warning("BROTLI decompression failed for partition %s: %s, blob first 16 bytes: %s",
+                                           name, brotli_err, blob[:16].hex() if len(blob) >= 16 else blob.hex())
+                            # BROTLI failed, try LZ4
+                            try:
+                                import lz4.frame
+                                blob = lz4.frame.decompress(blob)
+                            except ImportError:
+                                logger.error("BROTLI failed and lz4 not available for partition %s", name)
+                                continue
+                            except Exception as lz4e:
+                                logger.error("Both BROTLI and LZ4 failed for partition %s: brotli=%s, lz4=%s",
+                                             name, brotli_err, lz4e)
+                                continue
                     # op_type 0 = REPLACE (raw), no decompression needed
 
                     fout.seek(dst_offset)
