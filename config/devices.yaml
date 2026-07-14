@@ -4,7 +4,7 @@
 
 devices:
   # 示例设备 - 替换为您自己的 ROM 下载链接
-  - rom_url: "https://ultimateota.d.miui.com/OS3.0.315.0.WAACNXM/prague-ota_full-OS3.0.315.0.WAACNXM-user-16.0-c2158acc78.zip?t=1784019727&s=b5e27a35a3a00512118df16adba1057a"
+  - rom_url: "https://ultimateota.d.miui.com/OS3.0.303.0.WOJCNXM/rodin-ota_full-OS3.0.303.0.WOJCNXM-user-16.0-8c6dab91a5.zip?t=1784022281&s=87bcc02b1ee46653e16ba89a00e007b1"
     # kernel_partition: 内核所在分区
     #   老手机 (Android 12 及更早): boot
     #   新手机 (Android 13+ GKI):     init_boot
