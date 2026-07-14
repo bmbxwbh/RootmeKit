@@ -35,8 +35,8 @@ REQUIRED_SYMBOLS: dict[str, list[str]] = {
 # ── Required struct fields ────────────────────────────────────────────────
 
 REQUIRED_STRUCT_FIELDS: dict[str, list[str]] = {
-    "task_struct": ["cred", "pid", "tasks", "seccomp", "real_cred"],
-    "cred": ["uid", "gid", "cap_effective", "cap_inheritable",
+    "task_struct": ["cred", "pid", "tasks", "seccomp", "real_cred", "flags"],
+    "cred": ["uid", "gid", "euid", "egid", "cap_effective", "cap_inheritable",
              "cap_permitted", "cap_bset", "security"],
     "pipe_buffer": ["page", "ops", "flags", "private"],
     "mm_struct": ["start_code", "end_code", "start_data", "end_data",
