@@ -334,45 +334,64 @@ def compile_exploit(
 
     output_bin = out_dir / "preload.so"
 
-    # Find NDK compiler
-    compiler_map: dict[str, str] = {
-        "aarch64": "aarch64-linux-android35-clang",
-        "arm": "armv7a-linux-androideabi35-clang",
-        "x86_64": "x86_64-linux-android35-clang",
+    # Target triple map for --target flag
+    target_map: dict[str, str] = {
+        "aarch64": "aarch64-linux-android35",
+        "arm": "armv7a-linux-androideabi35",
+        "x86_64": "x86_64-linux-android35",
     }
-    compiler_name = compiler_map.get(arch, "aarch64-linux-android35-clang")
+    target_triple = target_map.get(arch, "aarch64-linux-android35")
 
+    # Find the real clang binary (not the shell script wrapper).
+    # NDK's *-clang scripts use #!/usr/bin/env bash which fails when
+    # invoked from Python subprocess in some CI environments.
+    # The actual clang binary is at <ndk>/bin/clang — an ELF executable.
     ndk_home = os.environ.get("ANDROID_NDK_HOME", "")
-    compiler = compiler_name
+    clang_bin = "clang"  # fallback
+    ndk_sysroot = ""
     if ndk_home:
-        candidate = (
-            Path(ndk_home)
-            / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64"
-            / "bin" / compiler_name
-        )
-        if candidate.exists():
-            compiler = str(candidate)
+        ndk_bin = Path(ndk_home) / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
+        # Prefer the real clang binary over the shell wrapper
+        real_clang = ndk_bin / "clang"
+        if real_clang.exists():
+            clang_bin = str(real_clang)
+            logger.info("Using real clang binary: %s", clang_bin)
+            # Sysroot for Android headers
+            ndk_sysroot = str(
+                Path(ndk_home) / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "sysroot"
+            )
+        else:
+            # Fallback: try the wrapper script
+            wrapper = ndk_bin / f"{target_triple}-clang"
+            if wrapper.exists():
+                clang_bin = str(wrapper)
+                logger.info("Using clang wrapper: %s", clang_bin)
 
-    logger.info("Compiling exploit with %s for %s...", compiler, arch)
+    logger.info("Compiling exploit with %s --target=%s for %s...", clang_bin, target_triple, arch)
 
     # Verify compiler exists
-    if not Path(compiler).exists() and not shutil.which(compiler):
+    if not Path(clang_bin).exists() and not shutil.which(clang_bin):
         logger.error(
             "Compiler not found: %s (ANDROID_NDK_HOME=%s)",
-            compiler, os.environ.get("ANDROID_NDK_HOME", ""),
+            clang_bin, os.environ.get("ANDROID_NDK_HOME", ""),
         )
         return None
 
     cmd = [
-        compiler,
+        clang_bin,
+        f"--target={target_triple}",
         "-O2",
         "-Wall",
         "-Wno-#warnings",
+    ]
+    if ndk_sysroot:
+        cmd.append(f"--sysroot={ndk_sysroot}")
+    cmd.extend([
         f"-I{src}",
         "-shared",
         "-o", str(output_bin),
         str(exploit_c),
-    ]
+    ])
 
     proc = _run_cmd(cmd, cwd=str(src))
     if proc.returncode != 0:
