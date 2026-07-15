@@ -7,7 +7,7 @@
 
 devices:
   # ROM 示例 - 填写完整 ROM 下载链接
-  - url: "https://firmware-res.flyme.com/Firmware/Flyme/meizu21Pro/12.6.0.0/cn/20260128055916/f1f595db/update.zip?auth_key=1784096097-0-0-b58c55a4216062359fa9d98443fcef8c"
+  - url: "https://gauss-compota-c-cn.allawnfs.com/remove-24b572ce99b11baa0fd437dddf96fc64/g-10eab6008d5642cf42abd2aa41f847cb/component-ota/26/04/13/2abf9491f2104f5f851aa093596f7c20.zip?sign=56af172191432d1efc5649e19048c5db&t=6a57047d&AWSAccessKeyId=ayjy7KyLVHvDqDax6_KqJgtBeORTJARg9MSGiL66&Expires=1784089477&Signature=L8ImvvPZzjdVYHBBAka5GHpdRAw%3D"
 
   # Boot 镜像示例 - 直接填写 boot.img 或 init_boot.img 链接
   # - url: "https://example.com/init_boot.img"
