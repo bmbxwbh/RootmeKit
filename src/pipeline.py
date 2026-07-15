@@ -74,6 +74,9 @@ class DeviceConfig:
     url: str
     kernel_partition: str | None = None
     manual_offsets: dict[str, int] = field(default_factory=dict)
+    su_binary: str | None = None
+    ksud_binary: str | None = None
+    wallpaper: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DeviceConfig:
@@ -112,7 +115,63 @@ class DeviceConfig:
             url=url,
             kernel_partition=kernel_partition,
             manual_offsets=manual_offsets,
+            su_binary=data.get("su_binary"),
+            ksud_binary=data.get("ksud_binary"),
+            wallpaper=data.get("wallpaper"),
         )
+
+
+def _fetch_ksu_binaries(work_dir: Path, device_config: DeviceConfig) -> dict[str, bytes | None]:
+    """Fetch KernelSU binaries for embedding into exploit."""
+    result: dict[str, bytes | None] = {
+        "su_binary": None,
+        "ksud_binary": None,
+        "wallpaper_data": None,
+    }
+
+    # Try local paths from device config
+    if device_config.su_binary:
+        p = Path(device_config.su_binary)
+        if p.exists():
+            result["su_binary"] = p.read_bytes()
+            logger.info("[KSU] Loaded su binary: %s (%d bytes)", p, len(result["su_binary"]))
+
+    if device_config.ksud_binary:
+        p = Path(device_config.ksud_binary)
+        if p.exists():
+            result["ksud_binary"] = p.read_bytes()
+            logger.info("[KSU] Loaded ksud binary: %s (%d bytes)", p, len(result["ksud_binary"]))
+
+    if device_config.wallpaper:
+        p = Path(device_config.wallpaper)
+        if p.exists():
+            result["wallpaper_data"] = p.read_bytes()
+            logger.info("[KSU] Loaded wallpaper: %s (%d bytes)", p, len(result["wallpaper_data"]))
+
+    # Try CI artifact paths (downloaded by build.yml)
+    ci_paths = [
+        work_dir / "ksu_binaries" / "su",
+        work_dir / "ksu_binaries" / "ksud",
+        Path("/tmp/ksu_binaries/su"),
+        Path("/tmp/ksu_binaries/ksud"),
+    ]
+    if not result["su_binary"]:
+        for p in ci_paths[:2]:
+            if p.exists() and p.name == "su":
+                result["su_binary"] = p.read_bytes()
+                logger.info("[KSU] Loaded su from CI artifact: %s", p)
+                break
+    if not result["ksud_binary"]:
+        for p in ci_paths:
+            if p.exists() and p.name == "ksud":
+                result["ksud_binary"] = p.read_bytes()
+                logger.info("[KSU] Loaded ksud from CI artifact: %s", p)
+                break
+
+    if not result["su_binary"] and not result["ksud_binary"]:
+        logger.info("[KSU] No binaries found — using fallback shell script su")
+
+    return result
 
 
 def _cleanup(*paths: Path, label: str = "") -> None:
@@ -260,6 +319,10 @@ def run_device(device_config: DeviceConfig, work_dir: str | Path) -> BuildResult
             "arch": result.arch,
             "kernel_is_gki": result.kernel_is_gki,
         }
+
+        # Fetch KernelSU binaries for embedding
+        binaries = _fetch_ksu_binaries(device_work, device_config)
+        codegen_prev.update(binaries)
         codegen_result = codegen_run(
             codegen_prev, device_work, {
                 "name": device_config.name,

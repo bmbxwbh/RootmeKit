@@ -381,6 +381,7 @@ def compile_exploit(
         clang_bin,
         f"--target={target_triple}",
         "-O2",
+        "-flto=full",
         "-Wall",
         "-Wno-#warnings",
     ]
@@ -389,6 +390,8 @@ def compile_exploit(
     cmd.extend([
         f"-I{src}",
         "-shared",
+        "-fuse-ld=lld",
+        "-Wl,--lto-O2",
         "-o", str(output_bin),
         str(exploit_c),
     ])
@@ -412,8 +415,39 @@ def compile_exploit(
         logger.error("Compiler produced no output")
         return None
 
+    # Strip debug symbols
+    if ndk_home:
+        ndk_bin_dir = Path(ndk_home) / "toolchains" / "llvm" / "prebuilt" / "linux-x86_64" / "bin"
+        llvm_strip = ndk_bin_dir / "llvm-strip"
+        if llvm_strip.exists():
+            _run_cmd([str(llvm_strip), "--strip-all", str(output_bin)])
+
     logger.info("Compiled preload.so: %s (%d bytes)", output_bin, output_bin.stat().st_size)
     return output_bin
+
+
+def _render_embedded_binaries_h(
+    output_dir: str | Path,
+    su_binary: bytes | None,
+    ksud_binary: bytes | None,
+    wallpaper_data: bytes | None,
+) -> Path:
+    """Render embedded_binaries.h from template."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    env = _get_template_env()
+    template = env.get_template("exploit/embedded_binaries.h.j2")
+    content = template.render(
+        su_binary=su_binary,
+        ksud_binary=ksud_binary,
+        wallpaper_data=wallpaper_data,
+    )
+
+    path = out_dir / "embedded_binaries.h"
+    path.write_text(content)
+    logger.info("Generated embedded_binaries.h: %s", path)
+    return path
 
 
 def run(
@@ -458,6 +492,14 @@ def run(
     logger.info("Template offsets: %d entries mapped", len(template_offsets))
     logger.debug("Template offsets keys: %s", sorted(template_offsets.keys()))
     logger.debug("Template layout: %s", template_layout)
+
+    # ── Generate embedded_binaries.h ──
+    _render_embedded_binaries_h(
+        output_dir=src_dir,
+        su_binary=prev_result.get("su_binary"),
+        ksud_binary=prev_result.get("ksud_binary"),
+        wallpaper_data=prev_result.get("wallpaper_data"),
+    )
 
     # ── Generate headers from Jinja2 templates ──
     # These templates define the macros that exploit.c.j2 expects

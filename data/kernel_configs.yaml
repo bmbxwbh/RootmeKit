@@ -56,3 +56,10 @@ kernel_defaults:
       tasks: 0x778
       seccomp: 0xA50
       flags: 0x8
+
+# KernelSnitch KASLR bypass tuning
+kernelsnitch:
+  futex_hashsize: 256
+  probe_pages: 4096
+  slide_step: 0x200000
+  max_slide: 0x40000000

@@ -46,11 +46,19 @@ jobs:
       - name: Install vmlinux-to-elf
         run: pip install vmlinux-to-elf
 
-      - name: Setup Android NDK r27
+      - name: Setup Android NDK r29
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r27
+          ndk-version: r29
+
+      - name: Download KernelSU binaries
+        run: |
+          mkdir -p /tmp/ksu_binaries
+          KSU_TAG=$(curl -sL https://api.github.com/repos/tiann/KernelSU/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])" 2>/dev/null || echo "v1.0.0")
+          curl -sL "https://github.com/tiann/KernelSU/releases/download/${KSU_TAG}/ksud-aarch64" -o /tmp/ksu_binaries/ksud || true
+          chmod +x /tmp/ksu_binaries/ksud 2>/dev/null || true
+          echo "KSU binaries downloaded: $(ls -la /tmp/ksu_binaries/ 2>/dev/null)"
 
       - name: Run build pipeline
         id: build

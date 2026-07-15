@@ -19,5 +19,8 @@ devices:
   #     新手机 (Android 13+ GKI):     init_boot
   #     不填则自动尝试 init_boot -> boot -> vendor_boot
   #   manual_offsets: 自动提取失败时手动指定
-  #     KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
-  #     INIT_TASK_OFF: "0x0"
+#     KIMAGE_TEXT_BASE: "0xFFFFFFC080000000"
+#     INIT_TASK_OFF: "0x0"
+#   su_binary: "path/to/su"         # 内嵌 su 二进制路径
+#   ksud_binary: "path/to/ksud"     # 内嵌 ksud 守护进程路径
+#   wallpaper: "path/to/wallpaper.webp"  # 壁纸重载触发
